@@ -1,4 +1,3 @@
-import os
 import streamlit as st
 import sqlite3
 import pandas as pd
@@ -15,6 +14,23 @@ import streamlit.components.v1 as components
 # -----------------------------
 st.set_page_config(page_title="SCRAPGOGO Clone • YG Metals", layout="wide")
 DB_PATH = "scrap_pos.db"
+
+# -----------------------------
+# Browser print (cloud-friendly, no local server)
+# -----------------------------
+def open_print_dialog(receipt_html: str):
+    """Render receipt in iframe and trigger browser print dialog (works on Streamlit Cloud)."""
+    idx = receipt_html.rfind("</body>")
+    if idx >= 0:
+        html_with_print = (
+            receipt_html[:idx]
+            + "\n<script>window.onload=function(){window.print();};</script>\n</body>"
+            + receipt_html[idx + 7 :]
+        )
+    else:
+        html_with_print = receipt_html + "\n<script>window.onload=function(){window.print();};</script>"
+    components.html(html_with_print, height=600)
+
 
 # -----------------------------
 # DB helpers
@@ -790,19 +806,6 @@ def get_receipt_preview_html(rid: int) -> str:
     html_body = html_body.replace("<body>", "<body><div class=\"receipt-scroll\" style=\"max-height:85vh;overflow-y:auto;\">", 1)
     return wrap_receipt_for_preview(html_body, scrollable=True)
 
-
-def open_print_dialog(receipt_html: str):
-    """
-    浏览器内打印：用 components.html 渲染收据并自动弹出打印对话框。
-    适用于 Streamlit Cloud 等云端部署，不依赖本地 print_server。
-    """
-    idx = receipt_html.rfind("</body>")
-    if idx >= 0:
-        print_script = '<script>window.onload = function() { window.print(); };</script>'
-        receipt_html = receipt_html[:idx] + print_script + "\n" + receipt_html[idx:]
-    components.html(receipt_html, height=600)
-
-
 def open_print_preview_window(receipt_html: str):
     """
     稳定方案 C：preview_html 存 server 端，用 ?preview_token=xxx 真实 URL 打开，避免 data URL/编码/策略问题。
@@ -1201,7 +1204,21 @@ def ticketing_page():
                     conn.commit()
                     conn.close()
 
-                    # 浏览器内打印：直接渲染收据 HTML 并自动弹出打印对话框，无需本地 print_server（适配 Streamlit Cloud）
+                    # 浏览器内打印：生成收据 HTML 并用 components.html 展示，onload 自动调 window.print()（无需本地 Flask）
+                    receipt_html = build_receipt_html_for_print(
+                        company_name="YGMETAL",
+                        ticket_number=str(wcode),
+                        email="test@ygmetal.com",
+                        issue_time=issue_time,
+                        cashier=(operator_name or operator_email),
+                        client_name=client_name,
+                        lines_df=df2,
+                        total_amount=float(rounding),
+                        rounding_amount=float(rounding - subtotal),
+                        adjustment_amount=0.0,
+                        paid_amount=0.0,
+                        balance_amount=float(rounding),
+                    )
                     open_print_dialog(receipt_html)
 
                     st.success(f"Saved. Withdraw code: {wcode}")
