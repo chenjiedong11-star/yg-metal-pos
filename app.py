@@ -15,8 +15,6 @@ import streamlit.components.v1 as components
 # -----------------------------
 st.set_page_config(page_title="SCRAPGOGO Clone • YG Metals", layout="wide")
 DB_PATH = "scrap_pos.db"
-# 独立打印服务真实 URL，保存收据后新窗口打开此 URL 打印（避免 iframe/data URL）
-PRINT_SERVER_URL = os.environ.get("PRINT_SERVER_URL", "http://localhost:8050").rstrip("/")
 
 # -----------------------------
 # DB helpers
@@ -792,6 +790,19 @@ def get_receipt_preview_html(rid: int) -> str:
     html_body = html_body.replace("<body>", "<body><div class=\"receipt-scroll\" style=\"max-height:85vh;overflow-y:auto;\">", 1)
     return wrap_receipt_for_preview(html_body, scrollable=True)
 
+
+def open_print_dialog(receipt_html: str):
+    """
+    浏览器内打印：用 components.html 渲染收据并自动弹出打印对话框。
+    适用于 Streamlit Cloud 等云端部署，不依赖本地 print_server。
+    """
+    idx = receipt_html.rfind("</body>")
+    if idx >= 0:
+        print_script = '<script>window.onload = function() { window.print(); };</script>'
+        receipt_html = receipt_html[:idx] + print_script + "\n" + receipt_html[idx:]
+    components.html(receipt_html, height=600)
+
+
 def open_print_preview_window(receipt_html: str):
     """
     稳定方案 C：preview_html 存 server 端，用 ?preview_token=xxx 真实 URL 打开，避免 data URL/编码/策略问题。
@@ -1141,7 +1152,7 @@ def ticketing_page():
         with colA:
             if st.button("Clear Receipt", use_container_width=True):
                 st.session_state.receipt_df = pd.DataFrame(columns=["Del","material","unit_price","gross","tare","net","total"])
-                for k in ("_pending_preview_b64", "_pending_preview_token", "_pending_preview_rid", "_print_diag"):
+                for k in ("_pending_preview_b64", "_pending_preview_token", "_print_diag"):
                     if k in st.session_state:
                         del st.session_state[k]
                 st.rerun()
@@ -1190,18 +1201,8 @@ def ticketing_page():
                     conn.commit()
                     conn.close()
 
-                    # 真实 URL 打印：打开独立打印服务 /print/receipt/<id>，该页加载后自动 window.print()，不在 Streamlit iframe 内打印
-                    st.session_state._pending_preview_rid = rid
-                    print_url = f"{PRINT_SERVER_URL}/print/receipt/{rid}"
-                    script = f"""<script>
-(function(){{
-  try {{
-    var url = {json.dumps(print_url)};
-    window.open(url, "_blank", "noopener,noreferrer");
-  }} catch(e) {{ console.error("Open print window failed:", e); }}
-}})();
-</script>"""
-                    components.html(script, height=0)
+                    # 浏览器内打印：直接渲染收据 HTML 并自动弹出打印对话框，无需本地 print_server（适配 Streamlit Cloud）
+                    open_print_dialog(receipt_html)
 
                     st.success(f"Saved. Withdraw code: {wcode}")
                     st.session_state.receipt_df = pd.DataFrame(columns=["Del","material","unit_price","gross","tare","net","total"])
@@ -1215,19 +1216,6 @@ def ticketing_page():
                 st.write("base64 length:", d["b64_len"])
                 st.text_area("preview_html 前 200 字符", value=d["first200"], height=120, key="diag_first200")
                 st.caption("若仍白页：Streamlit 是否在 iframe 里？是否有 CSP/sandbox？Edge 是否禁用 data URL？")
-        if st.session_state.get("_pending_preview_rid"):
-            rid = st.session_state._pending_preview_rid
-            print_url = f"{PRINT_SERVER_URL}/print/receipt/{rid}"
-            st.markdown(
-                f'<p style="margin-top:0.5rem;"><a href="{print_url}" target="_blank" rel="noopener" style="font-weight:bold;">If print window didn\'t open, click here</a></p>',
-                unsafe_allow_html=True,
-            )
-        # 测试入口：验证打印链路是否通
-        test_print_url = f"{PRINT_SERVER_URL}/print/receipt/test"
-        st.markdown(
-            f'<p style="margin-top:0.25rem;font-size:0.9em;"><a href="{test_print_url}" target="_blank" rel="noopener">验证打印：打开 /print/receipt/test</a></p>',
-            unsafe_allow_html=True,
-        )
         if st.session_state.get("_pending_preview_token"):
             tok = st.session_state._pending_preview_token
             st.markdown(
