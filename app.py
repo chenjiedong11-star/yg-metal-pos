@@ -17,12 +17,15 @@ st.set_page_config(page_title="SCRAPGOGO Clone • YG Metals", layout="wide")
 DB_PATH = "scrap_pos.db"
 
 # -----------------------------
-# 单页弹窗打印（不跳转、不新开标签，点击一次即弹出系统打印对话框）
+# 纯 Streamlit 前端打印（无需本地 Flask/print_server，部署 Streamlit Cloud 即可用）
+# 单页弹窗：不跳转、不新开标签，点击一次即弹出系统打印对话框。
 # -----------------------------
 def render_and_print_receipt(receipt_html: str) -> None:
     """
-    用隐藏 iframe 渲染收据 HTML，加载后自动弹出浏览器系统打印对话框。
-    不跳转、不打开新标签，打印内容仅含收据，关闭打印窗口后仍停留在原开票页。
+    用 streamlit.components.v1.html 注入收据 HTML（隐藏 iframe），
+    加载后自动 window.print() 弹出系统打印对话框。
+    不打开新标签、不跳转；打印内容仅含收据（由 receipt HTML 内 @page/@media print 控制）。
+    HTTPS/Streamlit Cloud 下可直接工作。
     """
     print_script = """
     <script>
