@@ -1,4 +1,5 @@
 import io
+import time
 import streamlit as st
 import sqlite3
 import pandas as pd
@@ -17,31 +18,37 @@ st.set_page_config(page_title="SCRAPGOGO Clone • YG Metals", layout="wide")
 DB_PATH = "scrap_pos.db"
 
 # -----------------------------
-# 纯 Streamlit 前端打印（无需本地 Flask/print_server，部署 Streamlit Cloud 即可用）
-# 单页弹窗：不跳转、不新开标签，点击一次即弹出系统打印对话框。
+# Popup 打印（最稳）：window.open 新窗口写入 receipt HTML 后 window.print()，避免 iframe 被静默拦截。
 # -----------------------------
 def render_and_print_receipt(receipt_html: str) -> None:
     """
-    用 streamlit.components.v1.html 注入收据 HTML（隐藏 iframe），
-    加载后自动 window.print() 弹出系统打印对话框。
-    不打开新标签、不跳转；打印内容仅含收据（由 receipt HTML 内 @page/@media print 控制）。
-    HTTPS/Streamlit Cloud 下可直接工作。
+    通过 popup 新窗口写入完整收据 HTML，再调用该窗口的 print()。
+    若弹窗被拦截，在页面注入可见提示，引导用户允许弹窗。
     """
-    print_script = """
+    js = f"""
     <script>
-      (function(){
-        var doPrint = function(){ window.focus(); window.print(); };
-        setTimeout(doPrint, 300);
-      })();
+    (function() {{
+      const html = {json.dumps(receipt_html)};
+      const w = window.open("", "_blank", "width=1,height=1,left=0,top=0");
+      if (!w) {{
+        const d = document.createElement('div');
+        d.style.cssText = "font-family:sans-serif;color:#b00;padding:8px;";
+        d.innerText = "Popup 被浏览器拦截：请允许此网站弹窗后再打印（地址栏右侧会有提示）。";
+        document.body.appendChild(d);
+        return;
+      }}
+      w.document.open();
+      w.document.write(html);
+      w.document.close();
+      w.focus();
+      setTimeout(function() {{
+        try {{ w.print(); }} catch(e) {{}}
+        setTimeout(function() {{ try {{ w.close(); }} catch(e) {{}} }}, 800);
+      }}, 300);
+    }})();
     </script>
     """
-    idx = receipt_html.rfind("</body>")
-    if idx >= 0:
-        html_with_print = receipt_html[:idx] + print_script + "\n</body>" + receipt_html[idx + 7 :]
-    else:
-        html_with_print = receipt_html + print_script
-    # 高度 1 使 iframe 不可见，仅用于触发打印，不显示第二页
-    components.html(html_with_print, height=1, scrolling=False)
+    components.html(js, height=0, scrolling=False)
 
 
 # -----------------------------
@@ -1214,72 +1221,81 @@ def ticketing_page():
                 st.rerun()
         with colB:
             if st.button("Print / Save Receipt", type="primary", use_container_width=True):
+                st.toast("PRINT CLICKED", icon="🖨️")
+                st.session_state["_print_debug_ts"] = time.time()
+
                 df2 = recompute_receipt_df(st.session_state.receipt_df)
                 if df2.empty:
                     st.warning("Receipt is empty.")
-                else:
-                    subtotal = float(df2["total"].sum())
-                    rounding = round(subtotal, 2)
-                    wcode = gen_withdraw_code()
+                    st.stop()
 
-                    operator_email = st.session_state.ticket_operator
-                    operator_name = ""
-                    op = operators[operators["email"] == operator_email]
-                    if len(op) > 0:
-                        operator_name = op.iloc[0]["name"]
+                subtotal = float(df2["total"].sum())
+                rounding = round(subtotal, 2)
+                wcode = gen_withdraw_code()
 
-                    client_code = st.session_state.ticket_client_code
-                    csel2 = clients[clients["code"] == client_code]
-                    client_name = csel2.iloc[0]["name"] if len(csel2) > 0 else ""
+                operator_email = st.session_state.ticket_operator
+                operator_name = ""
+                op = operators[operators["email"] == operator_email]
+                if len(op) > 0:
+                    operator_name = op.iloc[0]["name"]
 
-                    issue_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                client_code = st.session_state.ticket_client_code
+                csel2 = clients[clients["code"] == client_code]
+                client_name = csel2.iloc[0]["name"] if len(csel2) > 0 else ""
 
-                    conn = db()
-                    cur = conn.cursor()
-                    cur.execute("""
-                        INSERT INTO receipts(issue_time, issued_by, ticketing_method, withdraw_code,
-                                             client_code, client_name, subtotal, rounding_amount, voided, withdrawn)
-                        VALUES(?,?,?,?,?,?,?,?,0,0)
-                    """, (issue_time, operator_name or operator_email, "Print", wcode,
-                          client_code, client_name, float(subtotal), float(rounding)))
-                    rid = cur.lastrowid
+                issue_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-                    rows = []
-                    for r in df2.itertuples(index=False):
-                        rows.append((
-                            rid, r.material, float(r.unit_price), float(r.gross),
-                            float(r.tare), float(r.net), float(r.total)
-                        ))
-                    cur.executemany("""
-                        INSERT INTO receipt_lines(receipt_id, material_name, unit_price, gross, tare, net, total)
-                        VALUES(?,?,?,?,?,?,?)
-                    """, rows)
-                    conn.commit()
-                    conn.close()
+                conn = db()
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO receipts(issue_time, issued_by, ticketing_method, withdraw_code,
+                                         client_code, client_name, subtotal, rounding_amount, voided, withdrawn)
+                    VALUES(?,?,?,?,?,?,?,?,0,0)
+                """, (issue_time, operator_name or operator_email, "Print", wcode,
+                      client_code, client_name, float(subtotal), float(rounding)))
+                rid = cur.lastrowid
 
-                    # 单页弹窗打印：生成收据 HTML，隐藏 iframe 内自动 window.print()，不跳转、不新开标签
-                    receipt_html = build_receipt_html_for_print(
-                        company_name="YGMETAL",
-                        ticket_number=str(wcode),
-                        email="test@ygmetal.com",
-                        issue_time=issue_time,
-                        cashier=(operator_name or operator_email),
-                        client_name=client_name,
-                        lines_df=df2,
-                        total_amount=float(rounding),
-                        rounding_amount=float(rounding - subtotal),
-                        adjustment_amount=0.0,
-                        paid_amount=0.0,
-                        balance_amount=float(rounding),
-                    )
-                    render_and_print_receipt(receipt_html)
-                    st.toast("打印对话框已弹出")
+                rows = []
+                for r in df2.itertuples(index=False):
+                    rows.append((
+                        rid, r.material, float(r.unit_price), float(r.gross),
+                        float(r.tare), float(r.net), float(r.total)
+                    ))
+                cur.executemany("""
+                    INSERT INTO receipt_lines(receipt_id, material_name, unit_price, gross, tare, net, total)
+                    VALUES(?,?,?,?,?,?,?)
+                """, rows)
+                conn.commit()
+                conn.close()
 
-                    st.success(f"Saved. Withdraw code: {wcode}")
-                    st.session_state.receipt_df = pd.DataFrame(columns=["Del","material","unit_price","gross","tare","net","total"])
-                    st.rerun()
+                receipt_html = build_receipt_html_for_print(
+                    company_name="YGMETAL",
+                    ticket_number=str(wcode),
+                    email="test@ygmetal.com",
+                    issue_time=issue_time,
+                    cashier=(operator_name or operator_email),
+                    client_name=client_name,
+                    lines_df=df2,
+                    total_amount=float(rounding),
+                    rounding_amount=float(rounding - subtotal),
+                    adjustment_amount=0.0,
+                    paid_amount=0.0,
+                    balance_amount=float(rounding),
+                )
+                if not receipt_html or len(receipt_html) < 200:
+                    st.error("receipt_html empty/too short")
+                    st.stop()
 
-        # 单页弹窗打印：不再显示跳转/备用链接
+                st.success(f"Saved. Withdraw code: {wcode}")
+
+                with st.expander("DEBUG receipt_html (first 400 chars)"):
+                    st.code(receipt_html[:400], language="html")
+
+                render_and_print_receipt(receipt_html)
+                st.stop()
+
+        st.caption(f"print_debug_ts={st.session_state.get('_print_debug_ts')}")
+        # Popup 打印：不再显示跳转/备用链接
 
         st.markdown("</div>", unsafe_allow_html=True)
 
