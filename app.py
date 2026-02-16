@@ -1,4 +1,5 @@
 import io
+import re
 import time
 import streamlit as st
 import sqlite3
@@ -678,6 +679,26 @@ def generate_print_html(receipt_id: int) -> str:
         "</head><body>" + body_html + "</body></html>"
     )
 
+def _sanitize_style_block(style_content: str) -> str:
+    """
+    清理 <style> 内文本：删除行尾非注释形式的中文或非法说明，只保留合法 CSS。
+    说明须写成 /* ... */，否则会被截断。
+    """
+    lines = []
+    for line in style_content.splitlines():
+        s = line.rstrip()
+        if ";" in s:
+            idx = s.rfind(";")
+            after = s[idx + 1 :].strip()
+            if after:
+                valid_after = after.startswith("*/") or after.startswith("/*") or after == "}"
+                has_chinese = any("\u4e00" <= c <= "\u9fff" for c in after)
+                if has_chinese or not valid_after:
+                    s = s[: idx + 1]
+        lines.append(s)
+    return "\n".join(lines)
+
+
 def build_receipt_html_for_print(
     company_name: str,
     ticket_number: str,
@@ -692,7 +713,7 @@ def build_receipt_html_for_print(
     paid_amount: float = 0.0,
     balance_amount: float = 0.0,
 ):
-    """简易打印样式：窄票据 + 表格，可用于测试打印窗口是否正常弹出。"""
+    """返回完整合法 HTML 文档，仅含小票内容；<style> 内仅合法 CSS，无行尾中文。"""
     rows_html = ""
     for r in lines_df.itertuples(index=False):
         rows_html += f"""
@@ -801,7 +822,12 @@ def build_receipt_html_for_print(
     </body>
     </html>
     """
+    match = re.search(r"<style>(.*?)</style>", html_doc, re.DOTALL)
+    if match:
+        clean_style = _sanitize_style_block(match.group(1))
+        html_doc = html_doc[: match.start(1)] + clean_style + html_doc[match.end(1) :]
     return html_doc
+
 
 def _inject_blob_preview_open(b64: str):
     """D: Blob URL fallback — 用 UTF-8 解码 base64 后建 Blob，window.open(blobUrl)。"""
