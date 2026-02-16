@@ -18,42 +18,72 @@ st.set_page_config(page_title="SCRAPGOGO Clone • YG Metals", layout="wide")
 DB_PATH = "scrap_pos.db"
 
 # -----------------------------
-# Popup 打印：仅在新开小窗口内 print()，严禁对主页面 window.print()。
-# 只打印 receipt HTML（小票），不包含 Streamlit UI；弹窗被拦时在注入区显示明确提示。
+# iframe 打印：在当前页注入隐藏 iframe，写入 receipt HTML 后 iframe.contentWindow.print()。
+# 不打开新窗口/新标签，直接弹出系统打印对话框，只打印小票内容。
 # -----------------------------
 def render_and_print_receipt(receipt_html: str) -> None:
     """
-    在按钮点击事件内通过 window.open 打开 1x1 小窗口，写入完整收据 HTML，
-    在 popup 内调用 print()（双保险：onload 后 + setTimeout 600ms 再试一次），然后关闭 popup。
-    若 window.open 返回 null，在注入的 iframe 内显示「请允许弹窗」提示（height=90 可见）。
+    注入隐藏 iframe，将完整 receipt HTML 写入 iframe document，
+    ready 后调用 iframe.contentWindow.focus(); iframe.contentWindow.print()，
+    打印完成后移除 iframe。若 iframe print 失败则 fallback 到 popup 方案。
     """
+    payload = json.dumps(receipt_html)
     js = f"""
-    <script>
-    (function() {{
-      var html = {json.dumps(receipt_html)};
-      var w = window.open("", "_blank", "width=1,height=1,left=0,top=0");
-      if (!w) {{
-        document.body.innerHTML = '<div style="font-family:sans-serif;color:#b00;padding:10px;font-size:14px;line-height:1.4;">请允许此网站弹窗后再打印。<br/>在地址栏右侧或弹窗图标处点击「允许」即可。</div>';
-        document.body.style.background = '#fff';
-        return;
-      }}
-      w.document.open();
-      w.document.write(html);
-      w.document.close();
-      w.focus();
-      function doPrint() {{
-        try {{
+<script>
+(function() {{
+  const html = {payload};
+  const old = document.getElementById("receipt-print-frame");
+  if (old) old.remove();
+
+  const iframe = document.createElement("iframe");
+  iframe.id = "receipt-print-frame";
+  iframe.style.position = "fixed";
+  iframe.style.right = "0";
+  iframe.style.bottom = "0";
+  iframe.style.width = "0";
+  iframe.style.height = "0";
+  iframe.style.border = "0";
+  iframe.style.opacity = "0";
+  iframe.style.pointerEvents = "none";
+  document.body.appendChild(iframe);
+
+  const doc = iframe.contentWindow.document;
+  doc.open();
+  doc.write(html);
+  doc.close();
+
+  const doPrint = () => {{
+    try {{
+      iframe.contentWindow.focus();
+      iframe.contentWindow.print();
+      setTimeout(() => {{
+        try {{ iframe.remove(); }} catch(e) {{}}
+      }}, 1200);
+    }} catch(e) {{
+      console.error("iframe print failed", e);
+      try {{
+        const w = window.open("", "_blank", "width=1,height=1");
+        if (w) {{
+          w.document.write(html);
+          w.document.close();
+          w.focus();
           w.print();
-          setTimeout(function() {{ try {{ w.close(); }} catch(e) {{}} }}, 500);
-        }} catch(e) {{}}
-      }}
-      w.onload = doPrint;
-      setTimeout(doPrint, 350);
-      setTimeout(doPrint, 600);
-    }})();
-    </script>
-    """
-    components.html(js, height=90, scrolling=False)
+          setTimeout(() => {{ try {{ w.close(); }} catch(x) {{}} }}, 800);
+        }} else {{
+          document.body.innerHTML = '<div style="color:#b00;padding:8px;">打印失败：请尝试 Ctrl+P 或允许弹窗。</div>';
+        }}
+      }} catch(x) {{}}
+    }}
+  }};
+
+  iframe.onload = () => {{
+    setTimeout(doPrint, 200);
+  }};
+  setTimeout(doPrint, 600);
+}})();
+</script>
+"""
+    components.html(js, height=0, scrolling=False)
 
 
 # -----------------------------
