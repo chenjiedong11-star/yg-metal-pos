@@ -681,8 +681,8 @@ def generate_print_html(receipt_id: int) -> str:
 
 def _sanitize_style_block(style_content: str) -> str:
     """
-    清理 <style> 内文本：删除行尾非注释形式的中文或非法说明，只保留合法 CSS。
-    说明须写成 /* ... */，否则会被截断。
+    清理 <style> 内文本：只删除行尾非注释形式的中文说明，保留合法 CSS（含 }} 等闭合）。
+    说明须写成 /* ... */，否则会被截断。分号后仅有空白或 } 不截断。
     """
     lines = []
     for line in style_content.splitlines():
@@ -691,9 +691,10 @@ def _sanitize_style_block(style_content: str) -> str:
             idx = s.rfind(";")
             after = s[idx + 1 :].strip()
             if after:
-                valid_after = after.startswith("*/") or after.startswith("/*") or after == "}"
                 has_chinese = any("\u4e00" <= c <= "\u9fff" for c in after)
-                if has_chinese or not valid_after:
+                only_braces_space = all(c in "} \t" for c in after)
+                is_comment = after.strip().startswith("*/") or after.strip().startswith("/*")
+                if has_chinese or (not only_braces_space and not is_comment):
                     s = s[: idx + 1]
         lines.append(s)
     return "\n".join(lines)
