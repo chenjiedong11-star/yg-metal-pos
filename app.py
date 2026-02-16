@@ -17,20 +17,28 @@ st.set_page_config(page_title="SCRAPGOGO Clone • YG Metals", layout="wide")
 DB_PATH = "scrap_pos.db"
 
 # -----------------------------
-# Browser print (cloud-friendly, no local server)
+# 单页弹窗打印（不跳转、不新开标签，点击一次即弹出系统打印对话框）
 # -----------------------------
-def open_print_dialog(receipt_html: str):
-    """Render receipt in iframe and trigger browser print dialog (works on Streamlit Cloud)."""
+def render_and_print_receipt(receipt_html: str) -> None:
+    """
+    用隐藏 iframe 渲染收据 HTML，加载后自动弹出浏览器系统打印对话框。
+    不跳转、不打开新标签，打印内容仅含收据，关闭打印窗口后仍停留在原开票页。
+    """
+    print_script = """
+    <script>
+      (function(){
+        var doPrint = function(){ window.focus(); window.print(); };
+        setTimeout(doPrint, 300);
+      })();
+    </script>
+    """
     idx = receipt_html.rfind("</body>")
     if idx >= 0:
-        html_with_print = (
-            receipt_html[:idx]
-            + "\n<script>window.onload=function(){window.print();};</script>\n</body>"
-            + receipt_html[idx + 7 :]
-        )
+        html_with_print = receipt_html[:idx] + print_script + "\n</body>" + receipt_html[idx + 7 :]
     else:
-        html_with_print = receipt_html + "\n<script>window.onload=function(){window.print();};</script>"
-    components.html(html_with_print, height=600)
+        html_with_print = receipt_html + print_script
+    # 高度 1 使 iframe 不可见，仅用于触发打印，不显示第二页
+    components.html(html_with_print, height=1, scrolling=False)
 
 
 # -----------------------------
@@ -674,20 +682,24 @@ def build_receipt_html_for_print(
       <meta charset="utf-8" />
       <title>Receipt</title>
       <style>
-        @page {{ margin: 8mm; }}
+        @page {{ size: auto; margin: 10mm; }}
         body {{
           font-family: Arial, Helvetica, sans-serif;
           color: #000;
+          margin: 0;
+          padding: 0;
         }}
         .ticket {{
           width: 280px;
           margin: 0 auto;
         }}
-        .center {{ text-align:center; }}
-        .hr {{ border-top:1px solid #000; margin:8px 0; }}
-        table {{ width:100%; border-collapse:collapse; }}
+        .center {{ text-align: center; }}
+        .hr {{ border-top: 1px solid #000; margin: 8px 0; }}
+        table {{ width: 100%; border-collapse: collapse; }}
+        th, td {{ border: 1px solid #000; }}
         .receipt-table-wrap {{ overflow-x: auto; }}
         .receipt-table-wrap table td {{ white-space: nowrap; }}
+        .amount-bold {{ font-weight: 800; }}
       </style>
     </head>
     <body>
@@ -720,7 +732,7 @@ def build_receipt_html_for_print(
           <div><b>Rounding Amount :</b> <span style="float:right;">{rounding_amount:.2f}</span></div>
           <div><b>Adjustment Amount :</b> <span style="float:right;">{adjustment_amount:.2f}</span></div>
           <div><b>Paid Amount :</b> <span style="float:right;">{paid_amount:.2f}</span></div>
-          <div><b>Balance Amount :</b> <span style="float:right;">{balance_amount:.2f}</span></div>
+          <div><b>Balance Amount :</b> <span class="amount-bold" style="float:right;">{balance_amount:.2f}</span></div>
         </div>
 
         <div class="hr"></div>
@@ -1242,7 +1254,7 @@ def ticketing_page():
                     conn.commit()
                     conn.close()
 
-                    # 浏览器内打印：生成收据 HTML 并用 components.html 展示，onload 自动调 window.print()（无需本地 Flask）
+                    # 单页弹窗打印：生成收据 HTML，隐藏 iframe 内自动 window.print()，不跳转、不新开标签
                     receipt_html = build_receipt_html_for_print(
                         company_name="YGMETAL",
                         ticket_number=str(wcode),
@@ -1257,41 +1269,14 @@ def ticketing_page():
                         paid_amount=0.0,
                         balance_amount=float(rounding),
                     )
-                    open_print_dialog(receipt_html)
+                    render_and_print_receipt(receipt_html)
+                    st.toast("打印对话框已弹出")
 
                     st.success(f"Saved. Withdraw code: {wcode}")
                     st.session_state.receipt_df = pd.DataFrame(columns=["Del","material","unit_price","gross","tare","net","total"])
                     st.rerun()
 
-        # A: 诊断 + 备用链接（C 优先：server URL；B: data URL 加 charset=utf-8；D: Blob URL 按钮）
-        if st.session_state.get("_print_diag"):
-            d = st.session_state._print_diag
-            with st.expander("Print 诊断 (html_len / b64_len / first200)", expanded=False):
-                st.write("preview_html.length:", d["html_len"])
-                st.write("base64 length:", d["b64_len"])
-                st.text_area("preview_html 前 200 字符", value=d["first200"], height=120, key="diag_first200")
-                st.caption("若仍白页：Streamlit 是否在 iframe 里？是否有 CSP/sandbox？Edge 是否禁用 data URL？")
-        if st.session_state.get("_pending_preview_token"):
-            tok = st.session_state._pending_preview_token
-            st.markdown(
-                f'<p style="margin-top:0.5rem;"><a href="?preview_token={tok}" target="_blank" rel="noopener" style="font-weight:bold;">Legacy: open by token</a></p>',
-                unsafe_allow_html=True,
-            )
-        if st.session_state.get("_pending_preview_b64"):
-            b64 = st.session_state._pending_preview_b64
-            # B: data URL 加 charset=utf-8 避免中文解码白页
-            st.markdown(
-                '<p><a href="data:text/html;charset=utf-8;base64,' + b64 + '" target="_blank" rel="noopener" style="font-weight:bold;">Fallback: open via data URL (UTF-8)</a></p>',
-                unsafe_allow_html=True,
-            )
-            # D: Blob URL fallback 按钮
-            if st.button("Open via Blob URL (fallback)", key="open_blob_preview"):
-                _inject_blob_preview_open(st.session_state._pending_preview_b64)
-
-        # E: 最小可复现 — Print Test 按钮（固定简单 HTML：Hello + 时间 + Print）
-        with st.expander("Print Test (minimal HTML)"):
-            if st.button("Print Test", key="print_test_btn"):
-                _run_print_test()
+        # 单页弹窗打印：不再显示跳转/备用链接
 
         st.markdown("</div>", unsafe_allow_html=True)
 
