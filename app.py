@@ -41,11 +41,15 @@ def render_and_print_receipt(receipt_html: str) -> None:
       w.document.write(html);
       w.document.close();
       w.focus();
-      function doPrint() {{ try {{ w.print(); }} catch(e) {{}} }
-      w.onload = function() {{ doPrint(); }};
+      function doPrint() {{
+        try {{
+          w.print();
+          setTimeout(function() {{ try {{ w.close(); }} catch(e) {{}} }}, 500);
+        }} catch(e) {{}}
+      }}
+      w.onload = doPrint;
       setTimeout(doPrint, 350);
       setTimeout(doPrint, 600);
-      setTimeout(function() {{ try {{ w.close(); }} catch(e) {{}} }}, 1200);
     }})();
     </script>
     """
