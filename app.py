@@ -1,3 +1,4 @@
+import io
 import streamlit as st
 import sqlite3
 import pandas as pd
@@ -63,6 +64,41 @@ def get_preview_html(token: str):
     """按 token 取 print preview HTML。"""
     row = qone("SELECT html FROM print_previews WHERE token = ?", (token,))
     return row["html"] if row else None
+
+
+# -----------------------------
+# 票据汇总（月/日/年复用）
+# -----------------------------
+@st.cache_data(ttl=60)
+def get_monthly_invoice_summary(_start_date=None, _end_date=None, _status=None):
+    """按月聚合 receipts：开票时间(MM/YYYY)、开票数量、合计金额。仅统计 voided=0。返回带合计行的 DataFrame。"""
+    df = qdf("""
+        SELECT substr(issue_time,1,7) AS yyyy_mm,
+               COUNT(*) AS cnt,
+               COALESCE(SUM(rounding_amount),0) AS total
+        FROM receipts
+        WHERE voided = 0
+        GROUP BY yyyy_mm
+        ORDER BY yyyy_mm DESC
+    """)
+    if df.empty:
+        return pd.DataFrame({"开票时间": ["合计"], "开票数量": [0], "合计金额": [0.0]})
+    # 格式化为 MM/YYYY
+    def fmt_mm_yyyy(s):
+        if not s or len(s) < 7:
+            return s
+        y, m = s[:4], s[5:7]
+        return f"{m}/{y}"
+    df["开票时间"] = df["yyyy_mm"].apply(fmt_mm_yyyy)
+    df["开票数量"] = df["cnt"].astype(int)
+    df["合计金额"] = df["total"].round(2)
+    out = df[["开票时间", "开票数量", "合计金额"]].copy()
+    total_row = pd.DataFrame({
+        "开票时间": ["合计"],
+        "开票数量": [out["开票数量"].sum()],
+        "合计金额": [round(out["合计金额"].sum(), 2)],
+    })
+    return pd.concat([total_row, out], ignore_index=True)
 
 def qone(sql, params=()):
     conn = db()
@@ -243,8 +279,10 @@ def gen_withdraw_code():
 # Session state
 # -----------------------------
 def ss_init():
+    if "top_nav" not in st.session_state:
+        st.session_state.top_nav = "开票"
     if "manage_page" not in st.session_state:
-        st.session_state.manage_page = "Receipt Detail Inquiry"
+        st.session_state.manage_page = "月票据汇总信息查询"
 
     if "ticket_client_code" not in st.session_state:
         st.session_state.ticket_client_code = "000001"
@@ -1084,7 +1122,7 @@ def enter_workflow_js():
 # Ticketing page
 # -----------------------------
 def ticketing_page():
-    topbar("Ticketing")
+    topbar("开票")
 
     clients = qdf("SELECT code, name, phone FROM clients WHERE deleted=0 ORDER BY id DESC")
     operators = qdf("SELECT email, name FROM operators WHERE deleted=0 ORDER BY id DESC")
@@ -1703,25 +1741,73 @@ def manage_settings():
         st.success("Saved.")
         st.rerun()
 
+def _manage_placeholder():
+    """Manage 页右侧占位：与 ScrapGoGo 布局一致，内容暂留空。"""
+    st.markdown("---")
+    st.info("此区域留空，待后续开发。")
+    st.markdown("")
+
+
+def _monthly_summary_export_bytes() -> bytes:
+    """月汇总导出为 Excel 字节流（合计行 + 月份明细，金额两位小数）。"""
+    df = get_monthly_invoice_summary()
+    df["合计金额"] = df["合计金额"].apply(lambda x: round(float(x), 2))
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        df.to_excel(w, sheet_name="Monthly Summary", index=False)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def manage_monthly_summary_page():
+    """月票据汇总信息查询：标题、导出/刷新、三列表格（开票时间 MM/YYYY、开票数量、合计金额）+ 合计行。"""
+    st.subheader("月票据汇总信息查询")
+    col_btn1, col_btn2, _ = st.columns([1, 1, 4])
+    with col_btn1:
+        ts = datetime.now().strftime("%Y%m%d_%H%M")
+        excel_bytes = _monthly_summary_export_bytes()
+        st.download_button(
+            "导出数据到excel",
+            data=excel_bytes,
+            file_name=f"monthly_invoice_summary_{ts}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    with col_btn2:
+        if st.button("刷新数据"):
+            get_monthly_invoice_summary.clear()
+            st.success("刷新成功")
+            st.rerun()
+
+    df = get_monthly_invoice_summary()
+    n = len(df)
+    st.dataframe(df, use_container_width=True, height=min(400, 35 * n + 38))
+    st.caption(f"当前显示 1-{n} 条, 共 {n} 条")
+
+
 def manage_page():
-    topbar("Manage")
+    """Manage 页：与 ScrapGoGo 类似的顶栏 + 左侧菜单 + 右侧内容区。未登录提示。"""
+    if not st.session_state.get("ticket_operator"):
+        st.warning("请先登录后再访问管理页。")
+        return
+    topbar("管理")
     menu = [
-        ("Receipt Detail Inquiry", manage_receipt_detail_inquiry),
-        ("Void Receipts / Processing", manage_void_receipts),
-        ("Daily Transaction Summary", manage_daily_summary),
-        ("Monthly transaction summary", manage_monthly_summary),
-        ("Annual transaction summary", manage_annual_summary),
-        ("Client Information Management", manage_clients),
-        ("Operator Information Management", manage_operators),
-        ("Material Information Management", manage_materials),
-        ("system parameter setting", manage_settings),
+        ("票据明细信息查询", _manage_placeholder),
+        ("日票据汇总信息查询", _manage_placeholder),
+        ("月票据汇总信息查询", manage_monthly_summary_page),
+        ("年票据汇总信息查询", _manage_placeholder),
+        ("票据作废", _manage_placeholder),
+        ("客户信息管理", _manage_placeholder),
+        ("操作员信息管理", _manage_placeholder),
+        ("物料信息管理", _manage_placeholder),
+        ("系统参数设置", _manage_placeholder),
     ]
 
     left, right = st.columns([0.23, 0.77], gap="medium")
     with left:
-        st.markdown("### Menu")
+        st.markdown("### 菜单")
         labels = [m[0] for m in menu]
-        sel = st.radio("", labels, index=labels.index(st.session_state.manage_page) if st.session_state.manage_page in labels else 0)
+        idx = labels.index(st.session_state.manage_page) if st.session_state.manage_page in labels else 2
+        sel = st.radio("", labels, index=idx)
         st.session_state.manage_page = sel
 
     with right:
@@ -1793,10 +1879,12 @@ def main():
         return
     css()
 
-    tabs = st.tabs(["Ticketing", "Manage"])
-    with tabs[0]:
+    # 最上面两个入口：开票（前台） / 管理（后台）
+    st.markdown("**请选择：** 点击下方 **「开票」** 做前台收银开票，点击 **「管理」** 进入后台（月汇总、客户/操作员/物料等）。")
+    tab_open, tab_manage = st.tabs(["开票（前台）", "管理（后台）"])
+    with tab_open:
         ticketing_page()
-    with tabs[1]:
+    with tab_manage:
         manage_page()
 
 
