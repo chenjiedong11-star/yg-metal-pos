@@ -18,37 +18,38 @@ st.set_page_config(page_title="SCRAPGOGO Clone • YG Metals", layout="wide")
 DB_PATH = "scrap_pos.db"
 
 # -----------------------------
-# Popup 打印（最稳）：window.open 新窗口写入 receipt HTML 后 window.print()，避免 iframe 被静默拦截。
+# Popup 打印：仅在新开小窗口内 print()，严禁对主页面 window.print()。
+# 只打印 receipt HTML（小票），不包含 Streamlit UI；弹窗被拦时在注入区显示明确提示。
 # -----------------------------
 def render_and_print_receipt(receipt_html: str) -> None:
     """
-    通过 popup 新窗口写入完整收据 HTML，再调用该窗口的 print()。
-    若弹窗被拦截，在页面注入可见提示，引导用户允许弹窗。
+    在按钮点击事件内通过 window.open 打开 1x1 小窗口，写入完整收据 HTML，
+    在 popup 内调用 print()（双保险：onload 后 + setTimeout 600ms 再试一次），然后关闭 popup。
+    若 window.open 返回 null，在注入的 iframe 内显示「请允许弹窗」提示（height=90 可见）。
     """
     js = f"""
     <script>
     (function() {{
-      const html = {json.dumps(receipt_html)};
-      const w = window.open("", "_blank", "width=1,height=1,left=0,top=0");
+      var html = {json.dumps(receipt_html)};
+      var w = window.open("", "_blank", "width=1,height=1,left=0,top=0");
       if (!w) {{
-        const d = document.createElement('div');
-        d.style.cssText = "font-family:sans-serif;color:#b00;padding:8px;";
-        d.innerText = "Popup 被浏览器拦截：请允许此网站弹窗后再打印（地址栏右侧会有提示）。";
-        document.body.appendChild(d);
+        document.body.innerHTML = '<div style="font-family:sans-serif;color:#b00;padding:10px;font-size:14px;line-height:1.4;">请允许此网站弹窗后再打印。<br/>在地址栏右侧或弹窗图标处点击「允许」即可。</div>';
+        document.body.style.background = '#fff';
         return;
       }}
       w.document.open();
       w.document.write(html);
       w.document.close();
       w.focus();
-      setTimeout(function() {{
-        try {{ w.print(); }} catch(e) {{}}
-        setTimeout(function() {{ try {{ w.close(); }} catch(e) {{}} }}, 800);
-      }}, 300);
+      function doPrint() {{ try {{ w.print(); }} catch(e) {{}} }
+      w.onload = function() {{ doPrint(); }};
+      setTimeout(doPrint, 350);
+      setTimeout(doPrint, 600);
+      setTimeout(function() {{ try {{ w.close(); }} catch(e) {{}} }}, 1200);
     }})();
     </script>
     """
-    components.html(js, height=0, scrolling=False)
+    components.html(js, height=90, scrolling=False)
 
 
 # -----------------------------
@@ -693,11 +694,13 @@ def build_receipt_html_for_print(
       <title>Receipt</title>
       <style>
         @page {{ size: auto; margin: 10mm; }}
+        @media print {{ body {{ margin: 0; padding: 0; background: #fff; }} }}
         body {{
           font-family: Arial, Helvetica, sans-serif;
           color: #000;
           margin: 0;
           padding: 0;
+          background: #fff;
         }}
         .ticket {{
           width: 280px;
