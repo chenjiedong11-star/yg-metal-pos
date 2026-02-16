@@ -15,8 +15,16 @@ import streamlit.components.v1 as components
 # -----------------------------
 # Config
 # -----------------------------
-st.set_page_config(page_title="SCRAPGOGO Clone • YG Metals", layout="wide")
 DB_PATH = "scrap_pos.db"
+
+# 新 tab 打印页注入的 JS：onload 自动 print，onafterprint 关闭，5s 后备关闭（不用 f-string，避免大括号冲突）
+PRINT_PAGE_SCRIPT = """
+<script>
+window.onload = function() { setTimeout(function() { window.print(); }, 200); };
+window.onafterprint = function() { window.close(); };
+setTimeout(function() { window.close(); }, 5000);
+</script>
+"""
 
 # -----------------------------
 # iframe 打印：在当前页注入隐藏 iframe，写入 receipt HTML 后 iframe.contentWindow.print()。
@@ -117,6 +125,26 @@ def save_preview_html(html_content: str) -> str:
 def get_preview_html(token: str):
     """按 token 取 print preview HTML。"""
     row = qone("SELECT html FROM print_previews WHERE token = ?", (token,))
+    return row["html"] if row else None
+
+
+def save_receipt_print_html(html_content: str) -> int:
+    """存收据 HTML 到 receipt_print 表，返回 id，供 ?print=1&rid= 读取。"""
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO receipt_print(html, created_at) VALUES(?,?)",
+        (html_content, datetime.now().isoformat()),
+    )
+    rid = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return rid
+
+
+def get_receipt_print_html(rid: int):
+    """按 id 取 receipt_print 的 HTML。"""
+    row = qone("SELECT html FROM receipt_print WHERE id = ?", (rid,))
     return row["html"] if row else None
 
 
@@ -260,6 +288,13 @@ def init_db():
     cur.execute("""
     CREATE TABLE IF NOT EXISTS print_previews (
         token TEXT PRIMARY KEY,
+        html TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS receipt_print (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
         html TEXT NOT NULL,
         created_at TEXT NOT NULL
     )
@@ -1350,12 +1385,16 @@ def ticketing_page():
                     st.error("receipt_html empty/too short")
                     st.stop()
 
+                rid_print = save_receipt_print_html(receipt_html)
+                open_url_js = (
+                    '<script>window.open(window.location.origin + window.location.pathname + "?print=1&rid='
+                    + str(rid_print)
+                    + '", "_blank");</script>'
+                )
+                components.html(open_url_js, height=0, scrolling=False)
+
                 st.success(f"Saved. Withdraw code: {wcode}")
-
-                with st.expander("DEBUG receipt_html (first 400 chars)"):
-                    st.code(receipt_html[:400], language="html")
-
-                render_and_print_receipt(receipt_html)
+                st.toast("打印页已在新标签打开，打印或取消后标签将自动关闭。")
                 st.stop()
 
         st.caption(f"print_debug_ts={st.session_state.get('_print_debug_ts')}")
@@ -1910,7 +1949,24 @@ def _render_preview_page_by_rid(rid: int):
     # 提高高度并依赖页面内 85vh 滚动，避免只显示前几条明细
     components.html(html_content, height=1200)
 
+
+def _render_print_page(rid: int) -> None:
+    """?print=1&rid= 时：从 receipt_print 表取 HTML，注入自动 print/close 脚本，只渲染小票（无 Streamlit UI）。"""
+    html_content = get_receipt_print_html(rid)
+    if not html_content or len(html_content) < 100:
+        st.error("Print receipt not found or expired.")
+        return
+    idx = html_content.rfind("</body>")
+    if idx >= 0:
+        html_with_script = html_content[:idx] + PRINT_PAGE_SCRIPT + "\n</body>" + html_content[idx + 7 :]
+    else:
+        html_with_script = html_content + PRINT_PAGE_SCRIPT
+    components.html(html_with_script, height=900)
+
+
 def main():
+    st.set_page_config(page_title="SCRAPGOGO Clone • YG Metals", layout="wide", initial_sidebar_state="auto")
+
     try:
         init_db()
     except Exception as e:
@@ -1918,17 +1974,27 @@ def main():
         st.exception(e)
         return
 
-    # C: 本地预览路由 — ?preview_token=xxx 时只渲染预览页
-    params = getattr(st, "query_params", None)
-    preview_token = None
-    preview_rid = None
-    if params is not None:
-        preview_token = params.get("preview_token")
-        if isinstance(preview_token, list):
-            preview_token = preview_token[0] if preview_token else None
-        preview_rid = params.get("preview_rid")
-        if isinstance(preview_rid, list):
-            preview_rid = preview_rid[0] if preview_rid else None
+    params = getattr(st, "query_params", None) or {}
+    print_rid = params.get("rid") if params else None
+    if isinstance(print_rid, list):
+        print_rid = print_rid[0] if print_rid else None
+    print_mode = params.get("print") in ("1", 1) and print_rid
+
+    if print_mode:
+        try:
+            rid_int = int(print_rid)
+        except (ValueError, TypeError):
+            st.error("Invalid print rid.")
+            return
+        _render_print_page(rid_int)
+        return
+
+    preview_token = params.get("preview_token") if params else None
+    preview_rid = params.get("preview_rid") if params else None
+    if isinstance(preview_token, list):
+        preview_token = preview_token[0] if preview_token else None
+    if isinstance(preview_rid, list):
+        preview_rid = preview_rid[0] if preview_rid else None
     if preview_rid:
         try:
             _render_preview_page_by_rid(int(preview_rid))
