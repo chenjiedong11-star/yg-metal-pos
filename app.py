@@ -527,6 +527,11 @@ def ss_init():
     if "unit_price_input" not in st.session_state:
         st.session_state.unit_price_input = ""
 
+    if "_print_payload" not in st.session_state:
+        st.session_state._print_payload = None
+    if "_print_opened_once" not in st.session_state:
+        st.session_state._print_opened_once = False
+
 # -----------------------------
 # UI helpers
 # -----------------------------
@@ -1177,14 +1182,15 @@ def _inject_print_via_hidden_iframe(receipt_html: str) -> str:
 </script>
 </body></html>"""
 
-def add_line_to_receipt():
+def add_line_to_receipt(override_gross=None, override_tare=None, override_unit_price=None):
     if not st.session_state.picked_material_name:
         st.warning("Please pick a material.")
         return
 
-    unit_price = st.session_state.get("unit_price_input", "")
-    gross = st.session_state.get("gross_input", "")
-    tare = st.session_state.get("tare_input", "")
+    # ✅ 若传入 override 则用表单提交时的快照，避免 keypad+Enter 同时按导致被覆盖成 0
+    unit_price = override_unit_price if override_unit_price is not None else st.session_state.unit_price_input
+    gross = override_gross if override_gross is not None else st.session_state.gross_input
+    tare = override_tare if override_tare is not None else st.session_state.tare_input
 
     net, total = calc_line(unit_price, gross, tare)
     new_row = {
@@ -1346,6 +1352,23 @@ def enter_workflow_js():
 def ticketing_page():
     topbar("开票")
 
+    # --- one-shot print execution (two-phase rerun) ---
+    if st.session_state.get("_print_payload") and not st.session_state.get("_print_opened_once"):
+        st.session_state._print_opened_once = True
+        open_print_window(st.session_state._print_payload)
+        st.session_state.receipt_df = pd.DataFrame(columns=["Del", "material", "unit_price", "gross", "tare", "net", "total"])
+        st.session_state.picked_material_id = None
+        st.session_state.picked_material_name = ""
+        st.session_state.unit_price_input = ""
+        st.session_state.gross_input = ""
+        st.session_state.tare_input = ""
+        st.session_state.key_target = "gross"
+        st.session_state.focus_request = "gross"
+        st.session_state._entered_tare_for_line = False
+        st.session_state._keypad_pending = None
+        st.session_state._print_payload = None
+        st.rerun()
+
     clients = qdf("SELECT code, name, phone FROM clients WHERE deleted=0 ORDER BY id DESC")
     operators = qdf("SELECT email, name FROM operators WHERE deleted=0 ORDER BY id DESC")
     cats = qdf("SELECT id,name FROM material_categories ORDER BY sort_order, name")
@@ -1486,11 +1509,9 @@ def ticketing_page():
                     st.error("receipt_html empty/too short")
                     st.stop()
 
-                open_print_window(receipt_html)
-
-                st.success(f"Saved. Withdraw code: {wcode}")
-                st.toast("PRINT CLICKED")
-                st.stop()
+                st.session_state._print_payload = receipt_html
+                st.session_state._print_opened_once = False
+                st.rerun()
 
         st.caption(f"print_debug_ts={st.session_state.get('_print_debug_ts')}")
         # Popup 打印：不再显示跳转/备用链接
@@ -1642,12 +1663,12 @@ def ticketing_page():
 
         allow_price_edit = (get_setting("unit_price_adjustment_permitted", "Yes") == "Yes")
 
-        # ── 隐藏按钮：JS Enter 工作流用（→Tare / →Gross / TareKey）──
+        # ✅ 先处理「切到 Gross/Tare」按钮（放在最前），这样和 keypad 同一点时 delete 会作用到 Gross
         _sw_hide, _sw_main = st.columns([0.001, 99])
         with _sw_hide:
-            _to_tare = st.button("→Tare", key="switch_to_tare")
-            _to_gross = st.button("→Gross", key="switch_to_gross")
-            _to_tare_key = st.button("TareKey", key="switch_to_tare_key")
+            _to_tare = st.button("→Tare", key="switch_to_tare", help="Enter from Gross 时自动触发")
+            _to_gross = st.button("→Gross", key="switch_to_gross", help="点击 Gross 时自动触发")
+            _to_tare_key = st.button("TareKey", key="switch_to_tare_key", help="点击 Tare 时仅更新 key_target")
         if _to_gross:
             st.session_state.key_target = "gross"
         if _to_tare:
@@ -1659,12 +1680,21 @@ def ticketing_page():
         if _to_tare_key:
             st.session_state.key_target = "tare"
             st.session_state._entered_tare_for_line = True
-
+        # ✅ 未选产品时 Unit Price 不显示；未 Enter 到 Tare 时 Tare 不显示
         if not st.session_state.get("picked_material_id"):
             st.session_state.unit_price_input = ""
 
-        # ── 应用 keypad 挂起操作（在控件创建前）──
-        if st.session_state.get("_keypad_pending"):
+        # ✅ 不因 →Tare 而 rerun，避免未提交的表单导致 session_state 里 unit_price 丢失；focus_js 本 run 末尾会执行
+
+        # ✅ 先保存当前值：若本 run 是 form 提交触发的，后面处理 _keypad_pending 可能覆盖，Confirm 时用此快照
+        st.session_state._saved_confirm_snapshot = (
+            (st.session_state.get("gross_input") or ""),
+            (st.session_state.get("tare_input") or ""),
+            (st.session_state.get("unit_price_input") or ""),
+        )
+
+        # ✅ 在表单创建前应用 keypad 按键；若本 run 刚点了 →Gross，delete/输入应对 Gross 生效
+        if st.session_state._keypad_pending:
             act, tgt, ch = st.session_state._keypad_pending
             st.session_state._keypad_pending = None
             if _to_gross and tgt == "tare":
@@ -1673,57 +1703,70 @@ def ticketing_page():
                 tgt = "tare"
             key_map = {"gross": "gross_input", "tare": "tare_input", "unit_price": "unit_price_input"}
             skey = key_map.get(tgt, "gross_input")
-            s = (st.session_state.get(skey) or "")
-            if act == "append" and ch and ch in "0123456789.":
-                if ch == "." and "." in s:
-                    pass
-                elif skey in ("tare_input", "gross_input") and s.strip() == "0" and ch in "123456789":
+            s = (st.session_state.get(skey) or "") or ""
+            if act == "append" and ch and ch in "0123456789." and (ch != "." or "." not in s):
+                # Tare/Gross 若当前仅 "0"，首位输 1–9 时用替换，避免出现 "025"
+                if skey in ("tare_input", "gross_input") and s.strip() == "0" and ch in "123456789":
                     st.session_state[skey] = ch
                 else:
                     st.session_state[skey] = s + ch
-                if tgt == "tare":
-                    st.session_state._entered_tare_for_line = True
             elif act == "backspace":
                 st.session_state[skey] = s[:-1]
             st.session_state.focus_request = tgt if tgt in ("gross", "tare") else "gross"
 
-        # ── 控件创建前清零 ──
-        if st.session_state.get("_reset_line_fields"):
+        # ✅ 控件创建前清零（不能在 form 渲染后改 session_state）
+        if st.session_state._reset_line_fields:
             st.session_state.gross_input = ""
             st.session_state.tare_input = ""
             st.session_state._reset_line_fields = False
             st.session_state._entered_tare_for_line = False
+            st.session_state._form_reset_key = st.session_state.get("_form_reset_key", 0) + 1
         if st.session_state.get("_clear_all_line_fields"):
             st.session_state.unit_price_input = ""
             st.session_state.gross_input = ""
             st.session_state.tare_input = ""
             st.session_state._clear_all_line_fields = False
+            st.session_state._form_reset_key = st.session_state.get("_form_reset_key", 0) + 1
+        # ✅ Tare 在「应为空白」时与 Gross 同一步清空，避免 Confirm 后 Tare 清空有延迟
         if not st.session_state.get("_entered_tare_for_line"):
             st.session_state.tare_input = ""
 
-        # ── 输入区（不用 form，keypad 才能正确同步值）──
-        st.markdown('<div id="scrap-gross-tare-marker" style="display:none"></div>', unsafe_allow_html=True)
-        cA, cB, cC = st.columns([1.0, 1.0, 1.0], gap="small")
-        with cA:
-            st.text_input("Unit Price ($)", disabled=not allow_price_edit, key="unit_price_input")
-        with cB:
-            st.text_input("Gross (LB)", key="gross_input")
-        with cC:
-            st.text_input("Tare (LB)", key="tare_input")
+        _form_key = f"line_entry_form_{st.session_state.get('_form_reset_key', 0)}"
+        with st.form(_form_key, clear_on_submit=False):
+            st.markdown('<div id="scrap-gross-tare-marker" style="display:none"></div>', unsafe_allow_html=True)
+            cA, cB, cC = st.columns([1.0, 1.0, 1.0], gap="small")
+            with cA:
+                # 仅选中产品时显示 Unit Price，否则空白
+                unit_price_val = (st.session_state.get("unit_price_input") or "") if st.session_state.get("picked_material_id") else ""
+                st.text_input(
+                    "Unit Price ($)",
+                    value=unit_price_val,
+                    disabled=not allow_price_edit,
+                    key="unit_price_input",
+                )
+            with cB:
+                st.text_input(
+                    "Gross (LB)",
+                    value=st.session_state.get("gross_input", ""),
+                    key="gross_input",
+                )
+            with cC:
+                # Tare：空白时用「随 _form_reset_key 变化的 key」强制新建控件，避免沿用旧状态造成延迟
+                _fk = st.session_state.get("_form_reset_key", 0)
+                if st.session_state.get("_entered_tare_for_line"):
+                    st.text_input("Tare (LB)", value=st.session_state.get("tare_input", ""), key="tare_input")
+                else:
+                    st.text_input("Tare (LB)", value="", key=f"tare_input_blank_{_fk}")
 
-        tare_for_calc = (st.session_state.get("tare_input") or "") if st.session_state.get("_entered_tare_for_line") else ""
-        net, total = calc_line(
-            st.session_state.get("unit_price_input", ""),
-            st.session_state.get("gross_input", ""),
-            tare_for_calc,
-        )
-        st.markdown(f"**Net** :red[{net:.2f}] LB &nbsp;&nbsp; **Total Amount** :red[${total:.2f}]")
+            tare_for_calc = (st.session_state.get("tare_input") or "") if st.session_state.get("_entered_tare_for_line") else ""
+            net, total = calc_line(st.session_state.unit_price_input, st.session_state.gross_input, tare_for_calc)
+            st.markdown(f"**Net** :red[{net:.2f}] LB &nbsp;&nbsp; **Total Amount** :red[${total:.2f}]")
 
-        b1, b2 = st.columns(2, gap="small")
-        with b1:
-            clear_click = st.button("Clear", key="btn_clear_line", use_container_width=True)
-        with b2:
-            confirm_click = st.button("Confirm (Enter)", key="btn_confirm_line", use_container_width=True)
+            b1, b2 = st.columns(2, gap="small")
+            with b1:
+                clear_click = st.form_submit_button("Clear", use_container_width=True)
+            with b2:
+                confirm_click = st.form_submit_button("Confirm (Enter)", use_container_width=True)
 
         if clear_click:
             st.session_state.picked_material_id = None
@@ -1737,7 +1780,20 @@ def ticketing_page():
             st.rerun()
 
         if confirm_click:
-            add_line_to_receipt()
+            sg, stare, sup = st.session_state.get("_saved_confirm_snapshot", ("", "", ""))
+            # 若快照全空（可能被 clear_on_submit 或竞态清掉）则用当前 session_state
+            now_g = (st.session_state.get("gross_input") or "").strip()
+            now_t = (st.session_state.get("tare_input") or "").strip()
+            now_u = (st.session_state.get("unit_price_input") or "").strip()
+            if (sg, stare, sup) == ("", "", "") or (not sg and not stare):
+                sg, stare, sup = now_g, now_t, now_u
+            elif not sg and now_g:
+                sg = now_g
+            elif not stare and now_t:
+                stare = now_t
+            if not sup and now_u:
+                sup = now_u
+            add_line_to_receipt(override_gross=sg, override_tare=stare, override_unit_price=sup)
             st.session_state.picked_material_id = None
             st.session_state.picked_material_name = ""
             st.session_state._reset_line_fields = True
@@ -1748,40 +1804,63 @@ def ticketing_page():
 
         enter_workflow_js()
 
-        if st.session_state.get("focus_request") in ("gross", "tare"):
+        if st.session_state.focus_request in ("gross", "tare"):
             st.session_state._focus_counter = st.session_state.get("_focus_counter", 0) + 1
             focus_js(st.session_state.focus_request, st.session_state._focus_counter)
             st.session_state.focus_request = None
 
-        # ── Keypad ──
+        # ✅ Keypad
         st.write("")
         st.markdown("**Keypad**")
 
-        def _kp_press(ch):
-            st.session_state._keypad_pending = ("append", st.session_state.get("key_target", "gross"), ch)
+        # Target selector: Gross / Tare / Price
+        _cur_target = st.session_state.get("key_target", "gross")
+        _kt1, _kt2, _kt3 = st.columns(3, gap="small")
+        with _kt1:
+            if st.button("Gross", type="primary" if _cur_target == "gross" else "secondary", use_container_width=True, key="_kp_tgt_gross"):
+                st.session_state.key_target = "gross"
+                st.rerun()
+        with _kt2:
+            if st.button("Tare", type="primary" if _cur_target == "tare" else "secondary", use_container_width=True, key="_kp_tgt_tare"):
+                st.session_state.key_target = "tare"
+                st.session_state._entered_tare_for_line = True
+                st.rerun()
+        with _kt3:
+            if st.button("Price", type="primary" if _cur_target == "unit_price" else "secondary", use_container_width=True, key="_kp_tgt_price"):
+                st.session_state.key_target = "unit_price"
+                st.rerun()
 
-        def _kp_del():
-            st.session_state._keypad_pending = ("backspace", st.session_state.get("key_target", "gross"), None)
+        def keypad_append(ch: str):
+            tgt = st.session_state.get("key_target", "gross")
+            skey = {"unit_price": "unit_price_input", "tare": "tare_input"}.get(tgt, "gross_input")
+            s = (st.session_state.get(skey) or "") or ""
+            if ch not in "0123456789." or (ch == "." and "." in s):
+                return
+            st.session_state._keypad_pending = ("append", tgt, ch)
+
+        def keypad_backspace():
+            tgt = st.session_state.get("key_target", "gross")
+            st.session_state._keypad_pending = ("backspace", tgt, None)
 
         rA, rB, rC = st.columns(3, gap="small")
-        if rA.button("1", use_container_width=True): _kp_press("1"); st.rerun()
-        if rB.button("2", use_container_width=True): _kp_press("2"); st.rerun()
-        if rC.button("3", use_container_width=True): _kp_press("3"); st.rerun()
+        if rA.button("1", use_container_width=True): keypad_append("1"); st.rerun()
+        if rB.button("2", use_container_width=True): keypad_append("2"); st.rerun()
+        if rC.button("3", use_container_width=True): keypad_append("3"); st.rerun()
 
         rA, rB, rC = st.columns(3, gap="small")
-        if rA.button("4", use_container_width=True): _kp_press("4"); st.rerun()
-        if rB.button("5", use_container_width=True): _kp_press("5"); st.rerun()
-        if rC.button("6", use_container_width=True): _kp_press("6"); st.rerun()
+        if rA.button("4", use_container_width=True): keypad_append("4"); st.rerun()
+        if rB.button("5", use_container_width=True): keypad_append("5"); st.rerun()
+        if rC.button("6", use_container_width=True): keypad_append("6"); st.rerun()
 
         rA, rB, rC = st.columns(3, gap="small")
-        if rA.button("7", use_container_width=True): _kp_press("7"); st.rerun()
-        if rB.button("8", use_container_width=True): _kp_press("8"); st.rerun()
-        if rC.button("9", use_container_width=True): _kp_press("9"); st.rerun()
+        if rA.button("7", use_container_width=True): keypad_append("7"); st.rerun()
+        if rB.button("8", use_container_width=True): keypad_append("8"); st.rerun()
+        if rC.button("9", use_container_width=True): keypad_append("9"); st.rerun()
 
         rA, rB, rC = st.columns(3, gap="small")
-        if rA.button("0", use_container_width=True): _kp_press("0"); st.rerun()
-        if rB.button(".", use_container_width=True): _kp_press("."); st.rerun()
-        if rC.button("⌫", use_container_width=True): _kp_del(); st.rerun()
+        if rA.button("0", use_container_width=True): keypad_append("0"); st.rerun()
+        if rB.button(".", use_container_width=True): keypad_append("."); st.rerun()
+        if rC.button("delete", use_container_width=True): keypad_backspace(); st.rerun()
 
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1790,99 +1869,330 @@ def ticketing_page():
 # -----------------------------
 def manage_receipt_detail_inquiry():
     st.subheader("Receipt Detail Inquiry")
-    df = qdf("""
+    import math
+
+    receipts_df = qdf("""
         SELECT id, issue_time, issued_by, ticketing_method, withdraw_code,
-               subtotal, rounding_amount,
+               client_name, subtotal, rounding_amount,
                CASE WHEN voided=1 THEN 'Voided' ELSE 'Not Voided' END AS void_status,
                CASE WHEN withdrawn=1 THEN 'Withdrawn' ELSE 'Undrawn' END AS withdraw_status
         FROM receipts
         ORDER BY id DESC
         LIMIT 500
     """)
-    if df.empty:
+    if receipts_df.empty:
         st.info("No receipts yet.")
         return
-    st.dataframe(df, use_container_width=True, height=520)
+
+    # --- receipt selector ---
+    receipt_options = []
+    for _, row in receipts_df.iterrows():
+        label = f"RC {row['withdraw_code']}  |  {row['issue_time']}  |  {row.get('client_name', '')}  |  ${row['subtotal']:.2f}"
+        receipt_options.append((label, int(row["id"])))
+
+    sel_label = st.selectbox(
+        "Select Receipt",
+        options=[o[0] for o in receipt_options],
+        index=0,
+        key="_detail_receipt_sel",
+    )
+    sel_rid = dict(receipt_options).get(sel_label)
+    if sel_rid is None:
+        return
+
+    # --- receipt header info ---
+    rrow = receipts_df[receipts_df["id"] == sel_rid].iloc[0]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Withdraw Code", rrow["withdraw_code"])
+    c2.metric("Issue Time", rrow["issue_time"])
+    c3.metric("Status", rrow["void_status"])
+    c4.metric("Withdraw", rrow["withdraw_status"])
+
+    # --- receipt lines with Actual Amount / Rounding / Amount / Adjustment ---
+    lines_df = qdf("SELECT * FROM receipt_lines WHERE receipt_id = ? ORDER BY id", (int(sel_rid),))
+    if lines_df.empty:
+        st.info("No line items for this receipt.")
+        return
+
+    display_rows = []
+    for _, ln in lines_df.iterrows():
+        actual_amount = float(ln["total"])
+        amount = round(actual_amount)
+        rounding = round(amount - actual_amount, 3)
+        adjustment = 0.0
+        display_rows.append({
+            "Material": ln["material_name"],
+            "Gross(M)": f"{float(ln['gross']):.0f}",
+            "Tare": f"{float(ln['tare']):.0f}",
+            "Net": f"{float(ln['net']):.0f}",
+            "Actual Amount": f"${actual_amount:.3f}",
+            "Rounding": f"${rounding:+.3f}",
+            "Amount": f"${amount:.3f}",
+            "Adjustment": f"${adjustment:.3f}",
+        })
+
+    detail_df = pd.DataFrame(display_rows)
+    st.dataframe(detail_df, use_container_width=True, hide_index=True, height=min(56 + len(display_rows) * 35, 600))
+
+    # --- totals row ---
+    total_actual = sum(float(ln["total"]) for _, ln in lines_df.iterrows())
+    total_amount = sum(round(float(ln["total"])) for _, ln in lines_df.iterrows())
+    total_rounding = round(total_amount - total_actual, 3)
+    st.markdown(
+        f"**Totals** &nbsp;&nbsp; Actual Amount: **${total_actual:.3f}** &nbsp;&nbsp; "
+        f"Rounding: **${total_rounding:+.3f}** &nbsp;&nbsp; Amount: **${total_amount:.3f}** &nbsp;&nbsp; "
+        f"Adjustment: **$0.000**"
+    )
 
 def manage_void_receipts():
     st.subheader("Void / Withdraw Processing")
     df = qdf("""
-        SELECT id, issue_time, issued_by,
+        SELECT r.id, r.issue_time, r.issued_by, r.withdraw_code, r.client_name,
                (SELECT COUNT(*) FROM receipt_lines rl WHERE rl.receipt_id=r.id) AS material_count,
-               subtotal, rounding_amount, ticketing_method,
-               CASE WHEN withdrawn=1 THEN 'Withdrawn' ELSE 'Undrawn' END AS withdraw_status,
-               CASE WHEN voided=1 THEN 'Voided' ELSE 'Not Voided' END AS void_status
+               r.subtotal, r.rounding_amount,
+               CASE WHEN r.withdrawn=1 THEN 'Withdrawn' ELSE 'Undrawn' END AS withdraw_status,
+               CASE WHEN r.voided=1 THEN 'Voided' ELSE 'Not Voided' END AS void_status,
+               r.voided, r.withdrawn
         FROM receipts r
-        ORDER BY id DESC
+        ORDER BY r.id DESC
         LIMIT 500
     """)
     if df.empty:
         st.info("No receipts yet.")
         return
-    st.dataframe(df, use_container_width=True, height=520)
+
+    opts = []
+    for _, row in df.iterrows():
+        label = f"#{row['id']}  RC {row['withdraw_code']}  |  {row['issue_time']}  |  {row.get('client_name','')}  |  ${row['subtotal']:.2f}  |  {row['void_status']}"
+        opts.append((label, int(row["id"])))
+    sel_label = st.selectbox("Select Receipt", [o[0] for o in opts], index=0, key="_void_sel")
+    sel_id = dict(opts).get(sel_label)
+    if sel_id is None:
+        return
+    rrow = df[df["id"] == sel_id].iloc[0]
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Withdraw Code", rrow["withdraw_code"])
+    c2.metric("Subtotal", f"${rrow['subtotal']:.2f}")
+    c3.metric("Void Status", rrow["void_status"])
+    c4.metric("Withdraw", rrow["withdraw_status"])
+
+    lines = qdf("SELECT material_name, unit_price, gross, tare, net, total FROM receipt_lines WHERE receipt_id=? ORDER BY id", (int(sel_id),))
+    if not lines.empty:
+        st.dataframe(lines, use_container_width=True, hide_index=True)
+
+    bc1, bc2, _ = st.columns([1, 1, 4])
+    with bc1:
+        if int(rrow.get("voided", 0)) == 0:
+            if st.button("作废此票据", type="primary", key="_void_btn"):
+                exec_sql("UPDATE receipts SET voided=1 WHERE id=?", (int(sel_id),))
+                st.success("已作废。")
+                st.rerun()
+        else:
+            st.info("此票据已作废")
+    with bc2:
+        if int(rrow.get("withdrawn", 0)) == 0:
+            if st.button("标记已提货", key="_withdraw_btn"):
+                exec_sql("UPDATE receipts SET withdrawn=1 WHERE id=?", (int(sel_id),))
+                st.success("已标记提货。")
+                st.rerun()
+        else:
+            st.info("已提货")
+
 
 def manage_daily_summary():
     st.subheader("Daily Transaction Summary")
+    fc1, fc2, _ = st.columns([1, 1, 4])
+    with fc1:
+        d_from = st.date_input("From", value=datetime.now().replace(day=1), key="_ds_from")
+    with fc2:
+        d_to = st.date_input("To", value=datetime.now(), key="_ds_to")
     df = qdf("""
-        SELECT substr(issue_time,1,10) AS issue_date,
-               SUM((SELECT COALESCE(SUM(net),0) FROM receipt_lines rl WHERE rl.receipt_id=r.id)) AS invoiced_quantity,
-               SUM(subtotal) AS subtotal,
-               SUM(rounding_amount) AS rounding_amount
+        SELECT substr(r.issue_time,1,10) AS Date,
+               COUNT(r.id) AS Receipts,
+               COALESCE(SUM((SELECT COALESCE(SUM(rl.net),0) FROM receipt_lines rl WHERE rl.receipt_id=r.id)),0) AS Net_Total,
+               COALESCE(SUM(r.subtotal),0) AS Subtotal,
+               COALESCE(SUM(r.rounding_amount),0) AS Rounding
         FROM receipts r
-        WHERE voided=0
-        GROUP BY issue_date
-        ORDER BY issue_date DESC
-        LIMIT 1000
-    """)
-    st.dataframe(df, use_container_width=True, height=520)
+        WHERE r.voided=0 AND substr(r.issue_time,1,10) >= ? AND substr(r.issue_time,1,10) <= ?
+        GROUP BY Date
+        ORDER BY Date DESC
+    """, (str(d_from), str(d_to)))
+    if df.empty:
+        st.info("No data for this period.")
+        return
+    st.dataframe(df, use_container_width=True, height=min(520, 38 + 35 * len(df)))
+
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        df.to_excel(w, index=False, sheet_name="Daily")
+    st.download_button("Export Excel", data=buf.getvalue(),
+                       file_name=f"daily_summary_{d_from}_{d_to}.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 def manage_monthly_summary():
-    st.subheader("Monthly transaction summary")
+    st.subheader("Monthly Transaction Summary")
     df = qdf("""
-        SELECT substr(issue_time,1,7) AS issue_month,
-               SUM((SELECT COALESCE(SUM(net),0) FROM receipt_lines rl WHERE rl.receipt_id=r.id)) AS invoiced_quantity,
-               SUM(subtotal) AS subtotal,
-               SUM(rounding_amount) AS rounding_amount
+        SELECT substr(r.issue_time,1,7) AS Month,
+               COUNT(r.id) AS Receipts,
+               COALESCE(SUM((SELECT COALESCE(SUM(rl.net),0) FROM receipt_lines rl WHERE rl.receipt_id=r.id)),0) AS Net_Total,
+               COALESCE(SUM(r.subtotal),0) AS Subtotal,
+               COALESCE(SUM(r.rounding_amount),0) AS Rounding
         FROM receipts r
-        WHERE voided=0
-        GROUP BY issue_month
-        ORDER BY issue_month DESC
-        LIMIT 1000
+        WHERE r.voided=0
+        GROUP BY Month
+        ORDER BY Month DESC
     """)
-    st.dataframe(df, use_container_width=True, height=520)
+    if df.empty:
+        st.info("No data.")
+        return
+    st.dataframe(df, use_container_width=True, height=min(520, 38 + 35 * len(df)))
+
 
 def manage_annual_summary():
-    st.subheader("Annual transaction summary")
+    st.subheader("Annual Transaction Summary")
     df = qdf("""
-        SELECT substr(issue_time,1,4) AS issue_year,
-               SUM((SELECT COALESCE(SUM(net),0) FROM receipt_lines rl WHERE rl.receipt_id=r.id)) AS invoiced_quantity,
-               SUM(subtotal) AS subtotal,
-               SUM(rounding_amount) AS rounding_amount
+        SELECT substr(r.issue_time,1,4) AS Year,
+               COUNT(r.id) AS Receipts,
+               COALESCE(SUM((SELECT COALESCE(SUM(rl.net),0) FROM receipt_lines rl WHERE rl.receipt_id=r.id)),0) AS Net_Total,
+               COALESCE(SUM(r.subtotal),0) AS Subtotal,
+               COALESCE(SUM(r.rounding_amount),0) AS Rounding
         FROM receipts r
-        WHERE voided=0
-        GROUP BY issue_year
-        ORDER BY issue_year DESC
-        LIMIT 100
+        WHERE r.voided=0
+        GROUP BY Year
+        ORDER BY Year DESC
     """)
-    st.dataframe(df, use_container_width=True, height=520)
+    if df.empty:
+        st.info("No data.")
+        return
+    st.dataframe(df, use_container_width=True, height=min(520, 38 + 35 * len(df)))
+
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        df.to_excel(w, index=False, sheet_name="Annual")
+    st.download_button("Export Excel", data=buf.getvalue(),
+                       file_name=f"annual_summary.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 def manage_clients():
     st.subheader("Client Information Management")
-    df = qdf("""
-        SELECT code AS 编号, name AS 姓名, id_number AS 身份证号码, phone AS 手机号码, email AS 邮箱地址, deleted AS 删除标志
-        FROM clients
-        ORDER BY id DESC
-        LIMIT 2000
-    """)
-    st.dataframe(df, use_container_width=True, height=520)
+
+    with st.expander("Add New Client", expanded=False):
+        with st.form("_add_client_form", clear_on_submit=True):
+            ac1, ac2 = st.columns(2)
+            new_code = ac1.text_input("Code *")
+            new_name = ac2.text_input("Name *")
+            ac3, ac4, ac5 = st.columns(3)
+            new_phone = ac3.text_input("Phone")
+            new_email = ac4.text_input("Email")
+            new_id = ac5.text_input("ID Number")
+            if st.form_submit_button("Add Client", type="primary"):
+                if not new_code.strip() or not new_name.strip():
+                    st.warning("Code and Name are required.")
+                else:
+                    try:
+                        exec_sql(
+                            "INSERT INTO clients(code, name, phone, email, id_number, deleted, created_at) VALUES(?,?,?,?,?,0,?)",
+                            (new_code.strip(), new_name.strip(), new_phone.strip(), new_email.strip(), new_id.strip(), datetime.now().isoformat()),
+                        )
+                        st.success(f"Client {new_code} added.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed: {e}")
+
+    df = qdf("SELECT id, code, name, phone, email, id_number, deleted FROM clients ORDER BY id DESC LIMIT 2000")
+    if df.empty:
+        st.info("No clients.")
+        return
+
+    st.dataframe(
+        df[df["deleted"] == 0][["code", "name", "phone", "email", "id_number"]],
+        use_container_width=True, hide_index=True, height=min(420, 38 + 35 * len(df)),
+    )
+
+    del_code = st.text_input("Enter Client Code to delete (soft)", key="_del_client_code")
+    if st.button("Delete Client", key="_del_client_btn"):
+        if del_code.strip():
+            exec_sql("UPDATE clients SET deleted=1 WHERE code=?", (del_code.strip(),))
+            st.success(f"Client {del_code} soft-deleted.")
+            st.rerun()
+
 
 def manage_operators():
     st.subheader("Operator Information Management")
-    df = qdf("SELECT email AS 邮箱地址, name AS 姓名, deleted AS 删除标志, created_at FROM operators ORDER BY id DESC")
-    st.dataframe(df, use_container_width=True, height=520)
+
+    with st.expander("Add New Operator", expanded=False):
+        with st.form("_add_op_form", clear_on_submit=True):
+            oc1, oc2 = st.columns(2)
+            new_email = oc1.text_input("Email *")
+            new_name = oc2.text_input("Name *")
+            if st.form_submit_button("Add Operator", type="primary"):
+                if not new_email.strip() or not new_name.strip():
+                    st.warning("Email and Name are required.")
+                else:
+                    try:
+                        exec_sql(
+                            "INSERT INTO operators(email, name, deleted, created_at) VALUES(?,?,0,?)",
+                            (new_email.strip(), new_name.strip(), datetime.now().isoformat()),
+                        )
+                        st.success(f"Operator {new_email} added.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed: {e}")
+
+    df = qdf("SELECT id, email, name, deleted, created_at FROM operators ORDER BY id DESC")
+    if df.empty:
+        st.info("No operators.")
+        return
+
+    st.dataframe(
+        df[df["deleted"] == 0][["email", "name", "created_at"]],
+        use_container_width=True, hide_index=True, height=min(420, 38 + 35 * len(df)),
+    )
+
+    del_email = st.text_input("Enter Operator Email to delete (soft)", key="_del_op_email")
+    if st.button("Delete Operator", key="_del_op_btn"):
+        if del_email.strip():
+            exec_sql("UPDATE operators SET deleted=1 WHERE email=?", (del_email.strip(),))
+            st.success(f"Operator {del_email} soft-deleted.")
+            st.rerun()
+
 
 def manage_materials():
     st.subheader("Material Information Management")
+
+    cats_df = qdf("SELECT id, name FROM material_categories ORDER BY sort_order, name")
+    cat_names = cats_df["name"].tolist() if not cats_df.empty else []
+
+    with st.expander("Add New Material", expanded=False):
+        with st.form("_add_mat_form", clear_on_submit=True):
+            mc1, mc2, mc3 = st.columns(3)
+            mat_cat = mc1.selectbox("Category *", cat_names, key="_new_mat_cat")
+            mat_code = mc2.text_input("Item Code *")
+            mat_name = mc3.text_input("Name *")
+            mc4, mc5, mc6, mc7 = st.columns(4)
+            mat_unit = mc4.text_input("Unit", value="LB")
+            mat_price = mc5.number_input("Unit Price", min_value=0.0, step=0.001, format="%.3f")
+            mat_min = mc6.number_input("Min Price", min_value=0.0, step=0.001, format="%.3f")
+            mat_max = mc7.number_input("Max Price", min_value=0.0, step=0.001, format="%.3f")
+            if st.form_submit_button("Add Material", type="primary"):
+                if not mat_code.strip() or not mat_name.strip() or not mat_cat:
+                    st.warning("Category, Item Code and Name are required.")
+                else:
+                    cat_row = cats_df[cats_df["name"] == mat_cat]
+                    cat_id = int(cat_row.iloc[0]["id"]) if not cat_row.empty else 1
+                    try:
+                        exec_sql(
+                            "INSERT INTO materials(category_id, item_code, name, unit, unit_price, min_unit_price, max_unit_price, deleted, created_at) VALUES(?,?,?,?,?,?,?,0,?)",
+                            (cat_id, mat_code.strip(), mat_name.strip(), mat_unit.strip(), float(mat_price), float(mat_min), float(mat_max), datetime.now().isoformat()),
+                        )
+                        st.success(f"Material {mat_name} added.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed: {e}")
+
     df = qdf("""
         SELECT m.id, c.name AS category, m.item_code, m.name, m.unit,
                m.unit_price, m.min_unit_price, m.max_unit_price, m.deleted
@@ -1891,12 +2201,36 @@ def manage_materials():
         ORDER BY c.sort_order, m.item_code
         LIMIT 2000
     """)
-    st.dataframe(df, use_container_width=True, height=520)
+    if df.empty:
+        st.info("No materials.")
+        return
+
+    active = df[df["deleted"] == 0].copy()
+    st.dataframe(
+        active[["category", "item_code", "name", "unit", "unit_price", "min_unit_price", "max_unit_price"]],
+        use_container_width=True, hide_index=True, height=min(420, 38 + 35 * len(active)),
+    )
+
+    with st.expander("Edit Unit Price"):
+        ep1, ep2 = st.columns(2)
+        edit_id = ep1.number_input("Material ID", min_value=1, step=1, key="_edit_mat_id")
+        edit_price = ep2.number_input("New Unit Price", min_value=0.0, step=0.001, format="%.3f", key="_edit_mat_price")
+        if st.button("Update Price", key="_edit_mat_btn"):
+            exec_sql("UPDATE materials SET unit_price=? WHERE id=?", (float(edit_price), int(edit_id)))
+            st.success(f"Material #{edit_id} price updated to {edit_price:.3f}")
+            st.rerun()
+
+    del_id = st.number_input("Material ID to delete (soft)", min_value=1, step=1, key="_del_mat_id")
+    if st.button("Delete Material", key="_del_mat_btn"):
+        exec_sql("UPDATE materials SET deleted=1 WHERE id=?", (int(del_id),))
+        st.success(f"Material #{del_id} soft-deleted.")
+        st.rerun()
+
 
 def manage_settings():
-    st.subheader("system parameter setting")
+    st.subheader("System Parameter Settings")
     permitted = get_setting("unit_price_adjustment_permitted", "Yes")
-    yn = st.radio("Unit Price Adjustment Permitted", ["Yes", "No"], index=0 if permitted=="Yes" else 1, horizontal=True)
+    yn = st.radio("Unit Price Adjustment Permitted", ["Yes", "No"], index=0 if permitted == "Yes" else 1, horizontal=True)
     if st.button("Save Settings", type="primary"):
         exec_sql("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", ("unit_price_adjustment_permitted", yn))
         st.success("Saved.")
@@ -1952,15 +2286,15 @@ def manage_page():
         return
     topbar("管理")
     menu = [
-        ("票据明细信息查询", _manage_placeholder),
-        ("日票据汇总信息查询", _manage_placeholder),
+        ("票据明细信息查询", manage_receipt_detail_inquiry),
+        ("日票据汇总信息查询", manage_daily_summary),
         ("月票据汇总信息查询", manage_monthly_summary_page),
-        ("年票据汇总信息查询", _manage_placeholder),
-        ("票据作废", _manage_placeholder),
-        ("客户信息管理", _manage_placeholder),
-        ("操作员信息管理", _manage_placeholder),
-        ("物料信息管理", _manage_placeholder),
-        ("系统参数设置", _manage_placeholder),
+        ("年票据汇总信息查询", manage_annual_summary),
+        ("票据作废", manage_void_receipts),
+        ("客户信息管理", manage_clients),
+        ("操作员信息管理", manage_operators),
+        ("物料信息管理", manage_materials),
+        ("系统参数设置", manage_settings),
     ]
 
     left, right = st.columns([0.23, 0.77], gap="medium")
