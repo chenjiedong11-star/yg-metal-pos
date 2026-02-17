@@ -1177,15 +1177,14 @@ def _inject_print_via_hidden_iframe(receipt_html: str) -> str:
 </script>
 </body></html>"""
 
-def add_line_to_receipt(override_gross=None, override_tare=None, override_unit_price=None):
+def add_line_to_receipt():
     if not st.session_state.picked_material_name:
         st.warning("Please pick a material.")
         return
 
-    # ✅ 若传入 override 则用表单提交时的快照，避免 keypad+Enter 同时按导致被覆盖成 0
-    unit_price = override_unit_price if override_unit_price is not None else st.session_state.unit_price_input
-    gross = override_gross if override_gross is not None else st.session_state.gross_input
-    tare = override_tare if override_tare is not None else st.session_state.tare_input
+    unit_price = st.session_state.get("unit_price_input", "")
+    gross = st.session_state.get("gross_input", "")
+    tare = st.session_state.get("tare_input", "")
 
     net, total = calc_line(unit_price, gross, tare)
     new_row = {
@@ -1643,12 +1642,12 @@ def ticketing_page():
 
         allow_price_edit = (get_setting("unit_price_adjustment_permitted", "Yes") == "Yes")
 
-        # ✅ 先处理「切到 Gross/Tare」按钮（放在最前），这样和 keypad 同一点时 delete 会作用到 Gross
+        # ── 隐藏按钮：JS Enter 工作流用（→Tare / →Gross / TareKey）──
         _sw_hide, _sw_main = st.columns([0.001, 99])
         with _sw_hide:
-            _to_tare = st.button("→Tare", key="switch_to_tare", help="Enter from Gross 时自动触发")
-            _to_gross = st.button("→Gross", key="switch_to_gross", help="点击 Gross 时自动触发")
-            _to_tare_key = st.button("TareKey", key="switch_to_tare_key", help="点击 Tare 时仅更新 key_target")
+            _to_tare = st.button("→Tare", key="switch_to_tare")
+            _to_gross = st.button("→Gross", key="switch_to_gross")
+            _to_tare_key = st.button("TareKey", key="switch_to_tare_key")
         if _to_gross:
             st.session_state.key_target = "gross"
         if _to_tare:
@@ -1660,21 +1659,12 @@ def ticketing_page():
         if _to_tare_key:
             st.session_state.key_target = "tare"
             st.session_state._entered_tare_for_line = True
-        # ✅ 未选产品时 Unit Price 不显示；未 Enter 到 Tare 时 Tare 不显示
+
         if not st.session_state.get("picked_material_id"):
             st.session_state.unit_price_input = ""
 
-        # ✅ 不因 →Tare 而 rerun，避免未提交的表单导致 session_state 里 unit_price 丢失；focus_js 本 run 末尾会执行
-
-        # ✅ 先保存当前值：若本 run 是 form 提交触发的，后面处理 _keypad_pending 可能覆盖，Confirm 时用此快照
-        st.session_state._saved_confirm_snapshot = (
-            (st.session_state.get("gross_input") or ""),
-            (st.session_state.get("tare_input") or ""),
-            (st.session_state.get("unit_price_input") or ""),
-        )
-
-        # ✅ 在表单创建前应用 keypad 按键；若本 run 刚点了 →Gross，delete/输入应对 Gross 生效
-        if st.session_state._keypad_pending:
+        # ── 应用 keypad 挂起操作（在控件创建前）──
+        if st.session_state.get("_keypad_pending"):
             act, tgt, ch = st.session_state._keypad_pending
             st.session_state._keypad_pending = None
             if _to_gross and tgt == "tare":
@@ -1683,70 +1673,57 @@ def ticketing_page():
                 tgt = "tare"
             key_map = {"gross": "gross_input", "tare": "tare_input", "unit_price": "unit_price_input"}
             skey = key_map.get(tgt, "gross_input")
-            s = (st.session_state.get(skey) or "") or ""
-            if act == "append" and ch and ch in "0123456789." and (ch != "." or "." not in s):
-                # Tare/Gross 若当前仅 "0"，首位输 1–9 时用替换，避免出现 "025"
-                if skey in ("tare_input", "gross_input") and s.strip() == "0" and ch in "123456789":
+            s = (st.session_state.get(skey) or "")
+            if act == "append" and ch and ch in "0123456789.":
+                if ch == "." and "." in s:
+                    pass
+                elif skey in ("tare_input", "gross_input") and s.strip() == "0" and ch in "123456789":
                     st.session_state[skey] = ch
                 else:
                     st.session_state[skey] = s + ch
+                if tgt == "tare":
+                    st.session_state._entered_tare_for_line = True
             elif act == "backspace":
                 st.session_state[skey] = s[:-1]
             st.session_state.focus_request = tgt if tgt in ("gross", "tare") else "gross"
 
-        # ✅ 控件创建前清零（不能在 form 渲染后改 session_state）
-        if st.session_state._reset_line_fields:
+        # ── 控件创建前清零 ──
+        if st.session_state.get("_reset_line_fields"):
             st.session_state.gross_input = ""
             st.session_state.tare_input = ""
             st.session_state._reset_line_fields = False
             st.session_state._entered_tare_for_line = False
-            st.session_state._form_reset_key = st.session_state.get("_form_reset_key", 0) + 1
         if st.session_state.get("_clear_all_line_fields"):
             st.session_state.unit_price_input = ""
             st.session_state.gross_input = ""
             st.session_state.tare_input = ""
             st.session_state._clear_all_line_fields = False
-            st.session_state._form_reset_key = st.session_state.get("_form_reset_key", 0) + 1
-        # ✅ Tare 在「应为空白」时与 Gross 同一步清空，避免 Confirm 后 Tare 清空有延迟
         if not st.session_state.get("_entered_tare_for_line"):
             st.session_state.tare_input = ""
 
-        _form_key = f"line_entry_form_{st.session_state.get('_form_reset_key', 0)}"
-        with st.form(_form_key, clear_on_submit=False):
-            st.markdown('<div id="scrap-gross-tare-marker" style="display:none"></div>', unsafe_allow_html=True)
-            cA, cB, cC = st.columns([1.0, 1.0, 1.0], gap="small")
-            with cA:
-                # 仅选中产品时显示 Unit Price，否则空白
-                unit_price_val = (st.session_state.get("unit_price_input") or "") if st.session_state.get("picked_material_id") else ""
-                st.text_input(
-                    "Unit Price ($)",
-                    value=unit_price_val,
-                    disabled=not allow_price_edit,
-                    key="unit_price_input",
-                )
-            with cB:
-                st.text_input(
-                    "Gross (LB)",
-                    value=st.session_state.get("gross_input", ""),
-                    key="gross_input",
-                )
-            with cC:
-                # Tare：空白时用「随 _form_reset_key 变化的 key」强制新建控件，避免沿用旧状态造成延迟
-                _fk = st.session_state.get("_form_reset_key", 0)
-                if st.session_state.get("_entered_tare_for_line"):
-                    st.text_input("Tare (LB)", value=st.session_state.get("tare_input", ""), key="tare_input")
-                else:
-                    st.text_input("Tare (LB)", value="", key=f"tare_input_blank_{_fk}")
+        # ── 输入区（不用 form，keypad 才能正确同步值）──
+        st.markdown('<div id="scrap-gross-tare-marker" style="display:none"></div>', unsafe_allow_html=True)
+        cA, cB, cC = st.columns([1.0, 1.0, 1.0], gap="small")
+        with cA:
+            st.text_input("Unit Price ($)", disabled=not allow_price_edit, key="unit_price_input")
+        with cB:
+            st.text_input("Gross (LB)", key="gross_input")
+        with cC:
+            st.text_input("Tare (LB)", key="tare_input")
 
-            tare_for_calc = (st.session_state.get("tare_input") or "") if st.session_state.get("_entered_tare_for_line") else ""
-            net, total = calc_line(st.session_state.unit_price_input, st.session_state.gross_input, tare_for_calc)
-            st.markdown(f"**Net** :red[{net:.2f}] LB &nbsp;&nbsp; **Total Amount** :red[${total:.2f}]")
+        tare_for_calc = (st.session_state.get("tare_input") or "") if st.session_state.get("_entered_tare_for_line") else ""
+        net, total = calc_line(
+            st.session_state.get("unit_price_input", ""),
+            st.session_state.get("gross_input", ""),
+            tare_for_calc,
+        )
+        st.markdown(f"**Net** :red[{net:.2f}] LB &nbsp;&nbsp; **Total Amount** :red[${total:.2f}]")
 
-            b1, b2 = st.columns(2, gap="small")
-            with b1:
-                clear_click = st.form_submit_button("Clear", use_container_width=True)
-            with b2:
-                confirm_click = st.form_submit_button("Confirm (Enter)", use_container_width=True)
+        b1, b2 = st.columns(2, gap="small")
+        with b1:
+            clear_click = st.button("Clear", key="btn_clear_line", use_container_width=True)
+        with b2:
+            confirm_click = st.button("Confirm (Enter)", key="btn_confirm_line", use_container_width=True)
 
         if clear_click:
             st.session_state.picked_material_id = None
@@ -1760,20 +1737,7 @@ def ticketing_page():
             st.rerun()
 
         if confirm_click:
-            sg, stare, sup = st.session_state.get("_saved_confirm_snapshot", ("", "", ""))
-            # 若快照全空（可能被 clear_on_submit 或竞态清掉）则用当前 session_state
-            now_g = (st.session_state.get("gross_input") or "").strip()
-            now_t = (st.session_state.get("tare_input") or "").strip()
-            now_u = (st.session_state.get("unit_price_input") or "").strip()
-            if (sg, stare, sup) == ("", "", "") or (not sg and not stare):
-                sg, stare, sup = now_g, now_t, now_u
-            elif not sg and now_g:
-                sg = now_g
-            elif not stare and now_t:
-                stare = now_t
-            if not sup and now_u:
-                sup = now_u
-            add_line_to_receipt(override_gross=sg, override_tare=stare, override_unit_price=sup)
+            add_line_to_receipt()
             st.session_state.picked_material_id = None
             st.session_state.picked_material_name = ""
             st.session_state._reset_line_fields = True
@@ -1784,46 +1748,40 @@ def ticketing_page():
 
         enter_workflow_js()
 
-        if st.session_state.focus_request in ("gross", "tare"):
+        if st.session_state.get("focus_request") in ("gross", "tare"):
             st.session_state._focus_counter = st.session_state.get("_focus_counter", 0) + 1
             focus_js(st.session_state.focus_request, st.session_state._focus_counter)
             st.session_state.focus_request = None
 
-        # ✅ Keypad
+        # ── Keypad ──
         st.write("")
         st.markdown("**Keypad**")
 
-        def keypad_append(ch: str):
-            tgt = st.session_state.get("key_target", "gross")
-            skey = {"unit_price": "unit_price_input", "tare": "tare_input"}.get(tgt, "gross_input")
-            s = (st.session_state.get(skey) or "") or ""
-            if ch not in "0123456789." or (ch == "." and "." in s):
-                return
-            st.session_state._keypad_pending = ("append", tgt, ch)
+        def _kp_press(ch):
+            st.session_state._keypad_pending = ("append", st.session_state.get("key_target", "gross"), ch)
 
-        def keypad_backspace():
-            tgt = st.session_state.get("key_target", "gross")
-            st.session_state._keypad_pending = ("backspace", tgt, None)
+        def _kp_del():
+            st.session_state._keypad_pending = ("backspace", st.session_state.get("key_target", "gross"), None)
 
         rA, rB, rC = st.columns(3, gap="small")
-        if rA.button("1", use_container_width=True): keypad_append("1"); st.rerun()
-        if rB.button("2", use_container_width=True): keypad_append("2"); st.rerun()
-        if rC.button("3", use_container_width=True): keypad_append("3"); st.rerun()
+        if rA.button("1", use_container_width=True): _kp_press("1"); st.rerun()
+        if rB.button("2", use_container_width=True): _kp_press("2"); st.rerun()
+        if rC.button("3", use_container_width=True): _kp_press("3"); st.rerun()
 
         rA, rB, rC = st.columns(3, gap="small")
-        if rA.button("4", use_container_width=True): keypad_append("4"); st.rerun()
-        if rB.button("5", use_container_width=True): keypad_append("5"); st.rerun()
-        if rC.button("6", use_container_width=True): keypad_append("6"); st.rerun()
+        if rA.button("4", use_container_width=True): _kp_press("4"); st.rerun()
+        if rB.button("5", use_container_width=True): _kp_press("5"); st.rerun()
+        if rC.button("6", use_container_width=True): _kp_press("6"); st.rerun()
 
         rA, rB, rC = st.columns(3, gap="small")
-        if rA.button("7", use_container_width=True): keypad_append("7"); st.rerun()
-        if rB.button("8", use_container_width=True): keypad_append("8"); st.rerun()
-        if rC.button("9", use_container_width=True): keypad_append("9"); st.rerun()
+        if rA.button("7", use_container_width=True): _kp_press("7"); st.rerun()
+        if rB.button("8", use_container_width=True): _kp_press("8"); st.rerun()
+        if rC.button("9", use_container_width=True): _kp_press("9"); st.rerun()
 
         rA, rB, rC = st.columns(3, gap="small")
-        if rA.button("0", use_container_width=True): keypad_append("0"); st.rerun()
-        if rB.button(".", use_container_width=True): keypad_append("."); st.rerun()
-        if rC.button("delete", use_container_width=True): keypad_backspace(); st.rerun()
+        if rA.button("0", use_container_width=True): _kp_press("0"); st.rerun()
+        if rB.button(".", use_container_width=True): _kp_press("."); st.rerun()
+        if rC.button("⌫", use_container_width=True): _kp_del(); st.rerun()
 
         st.markdown("</div>", unsafe_allow_html=True)
 
