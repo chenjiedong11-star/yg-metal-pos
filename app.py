@@ -1850,26 +1850,42 @@ def ticketing_page():
         st.markdown("**Keypad**")
 
 <<<<<<< Current (Your changes)
-<<<<<<< Current (Your changes)
         # Target selector: Gross / Tare / Price
         _cur_target = st.session_state.get("key_target", "gross")
         _kt1, _kt2, _kt3 = st.columns(3, gap="small")
+
         with _kt1:
-            if st.button("Gross", type="primary" if _cur_target == "gross" else "secondary", use_container_width=True, key="_kp_tgt_gross"):
+            if st.button(
+                "Gross",
+                type="primary" if _cur_target == "gross" else "secondary",
+                use_container_width=True,
+                key="_kp_tgt_gross",
+            ):
                 st.session_state.key_target = "gross"
                 st.rerun()
+
         with _kt2:
-            if st.button("Tare", type="primary" if _cur_target == "tare" else "secondary", use_container_width=True, key="_kp_tgt_tare"):
+            if st.button(
+                "Tare",
+                type="primary" if _cur_target == "tare" else "secondary",
+                use_container_width=True,
+                key="_kp_tgt_tare",
+            ):
                 st.session_state.key_target = "tare"
                 st.session_state._entered_tare_for_line = True
+                st.session_state.focus_request = "tare"
                 st.rerun()
+
         with _kt3:
-            if st.button("Price", type="primary" if _cur_target == "unit_price" else "secondary", use_container_width=True, key="_kp_tgt_price"):
+            if st.button(
+                "Price",
+                type="primary" if _cur_target == "unit_price" else "secondary",
+                use_container_width=True,
+                key="_kp_tgt_price",
+            ):
                 st.session_state.key_target = "unit_price"
                 st.rerun()
 
-=======
->>>>>>> Incoming (Background Agent changes)
 =======
 >>>>>>> Incoming (Background Agent changes)
         def keypad_append(ch: str):
