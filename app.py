@@ -1287,21 +1287,57 @@ def enter_workflow_js():
           }
           return null;
         }
-        function onKeyDown(e){
-          if (e.key !== 'Enter') return;
+        function isReceivingInput(el) {
           var r = getGrossTare();
-          if (!r.g || !r.t) return;
+          if (!r.g || !r.t) return false;
+          if (el === r.g || el === r.t) return true;
+          var m = doc.getElementById('scrap-gross-tare-marker');
+          if (m) {
+            var form = m.closest('form');
+            if (form) {
+              var inputs = form.querySelectorAll('input:not([type="hidden"]):not([type="checkbox"])');
+              for (var i = 0; i < inputs.length; i++) { if (el === inputs[i]) return true; }
+            }
+          }
+          return false;
+        }
+        function onKeyDown(e){
           var active = doc.activeElement;
-          if (active === r.g) {
+          if (e.key === 'Enter') {
+            var r = getGrossTare();
+            if (!r.g || !r.t) return;
+            if (active === r.g) {
+              e.preventDefault();
+              e.stopPropagation();
+              var toTare = findBtn('→Tare');
+              if (toTare) toTare.click();
+            } else if (active === r.t) {
+              e.preventDefault();
+              e.stopPropagation();
+              var c = findBtn('Confirm');
+              if (c) c.click();
+            }
+            return;
+          }
+          if (!isReceivingInput(active)) return;
+          if (e.key === 'Backspace') {
             e.preventDefault();
             e.stopPropagation();
-            var toTare = findBtn('→Tare');
-            if (toTare) toTare.click();
-          } else if (active === r.t) {
+            var delBtn = findBtn('delete');
+            if (delBtn) delBtn.click();
+            return;
+          }
+          if ('0123456789.'.indexOf(e.key) >= 0) {
             e.preventDefault();
             e.stopPropagation();
-            var c = findBtn('Confirm');
-            if (c) c.click();
+            var numBtn = null;
+            var btns = doc.querySelectorAll('button');
+            for (var i = 0; i < btns.length; i++) {
+              var bt = (btns[i].innerText || btns[i].textContent || '').trim();
+              if (bt === e.key) { numBtn = btns[i]; break; }
+            }
+            if (numBtn) numBtn.click();
+            return;
           }
         }
         if (!doc.__enterBound) {
