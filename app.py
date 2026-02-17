@@ -17,12 +17,22 @@ import streamlit.components.v1 as components
 # -----------------------------
 DB_PATH = "scrap_pos.db"
 
-# 新 tab 打印页注入的 JS：onload 自动 print，onafterprint 关闭，5s 后备关闭（不用 f-string，避免大括号冲突）
+# 新标签打印页注入的 JS：在打印文档内执行，只用 window（不用 window.top）。
+# onload 延迟 150ms 调 window.print()；onafterprint 与 4 秒后备尝试 window.close()；4 秒后显示“请手动关闭”兜底。
+# 注意：Chrome/Edge 在用户未与打印对话框交互时可能拒绝 window.close()，此时依赖兜底提示。
 PRINT_PAGE_SCRIPT = """
 <script>
-window.onload = function() { setTimeout(function() { window.print(); }, 200); };
-window.onafterprint = function() { window.close(); };
-setTimeout(function() { window.close(); }, 5000);
+(function() {
+  window.onload = function() { setTimeout(function() { window.print(); }, 150); };
+  window.onafterprint = function() { try { window.close(); } catch(e) {} };
+  setTimeout(function() {
+    try { window.close(); } catch(e) {}
+    var tip = document.createElement("p");
+    tip.textContent = "如果页面未自动关闭，请手动关闭此标签页。";
+    tip.style.cssText = "margin:1rem;font-size:14px;color:#666;";
+    if (document.body) document.body.appendChild(tip);
+  }, 4000);
+})();
 </script>
 """
 
@@ -146,6 +156,98 @@ def get_receipt_print_html(rid: int):
     """按 id 取 receipt_print 的 HTML。"""
     row = qone("SELECT html FROM receipt_print WHERE id = ?", (rid,))
     return row["html"] if row else None
+
+
+def open_print_window(receipt_html: str) -> None:
+    """
+    稳定方案：由 opener 脚本负责 print/close，不把脚本注入到 receipt HTML 里。
+    - window.open 新标签
+    - doc.write 只写 receipt_html（纯内容）
+    - 轮询 w.document.readyState === 'complete' 后执行 w.print()
+    - afterprint / matchMedia / 4s 兜底关闭
+    """
+    payload = json.dumps(receipt_html)
+
+    script = f"""
+<script>
+(function() {{
+  const html = {payload};
+  const w = window.open('', '_blank');
+  if (!w) {{
+    alert('浏览器拦截了打印窗口，请允许弹窗后重试。');
+    return;
+  }}
+
+  // 1) 写入内容（不注入任何 print/close 脚本）
+  w.document.open();
+  w.document.write(html);
+  w.document.close();
+
+  // 2) 统一关闭函数
+  let closed = false;
+  function tryClose() {{
+    if (closed) return;
+    closed = true;
+    try {{ w.close(); }} catch(e) {{}}
+  }}
+
+  // 3) 打印：不要依赖 w.onload（document.write 场景 onload 不稳定）
+  let printed = false;
+  function doPrint() {{
+    if (printed) return;
+    printed = true;
+    try {{
+      w.focus();
+      w.print();
+    }} catch(e) {{
+      // 若被浏览器拦截自动打印，就留给用户手动 Ctrl+P
+      console.warn('auto print blocked', e);
+    }}
+  }}
+
+  // 轮询 readyState，最多等 2 秒
+  const start = Date.now();
+  const timer = setInterval(() => {{
+    try {{
+      if (w.document && w.document.readyState === 'complete') {{
+        clearInterval(timer);
+        setTimeout(doPrint, 150); // 再给一点渲染时间
+      }} else if (Date.now() - start > 2000) {{
+        clearInterval(timer);
+        setTimeout(doPrint, 150);
+      }}
+    }} catch(e) {{
+      // 跨域/不可访问时也兜底打印
+      clearInterval(timer);
+      setTimeout(doPrint, 150);
+    }}
+  }}, 50);
+
+  // 4) 打印后关闭（多路兜底）
+  w.addEventListener('afterprint', tryClose);
+
+  const mql = w.matchMedia ? w.matchMedia('print') : null;
+  if (mql) {{
+    const onChange = (e) => {{ if (!e.matches) tryClose(); }};
+    if (mql.addEventListener) mql.addEventListener('change', onChange);
+    else if (mql.addListener) mql.addListener(onChange);
+  }}
+
+  // 4 秒后兜底关闭
+  setTimeout(() => {{
+    tryClose();
+    // 仍没关就提示（有些浏览器会拒绝 close）
+    try {{
+      const tip = w.document.createElement('div');
+      tip.textContent = '如果页面未自动关闭，请手动关闭此标签页。';
+      tip.style.cssText = 'margin:16px;font-size:14px;color:#666;text-align:center;';
+      w.document.body && w.document.body.appendChild(tip);
+    }} catch(e) {{}}
+  }}, 4000);
+}})();
+</script>
+"""
+    components.html(script, height=0, width=0)
 
 
 # -----------------------------
@@ -1385,16 +1487,10 @@ def ticketing_page():
                     st.error("receipt_html empty/too short")
                     st.stop()
 
-                rid_print = save_receipt_print_html(receipt_html)
-                open_url_js = (
-                    '<script>window.open(window.location.origin + window.location.pathname + "?print=1&rid='
-                    + str(rid_print)
-                    + '", "_blank");</script>'
-                )
-                components.html(open_url_js, height=0, scrolling=False)
+                open_print_window(receipt_html)
 
                 st.success(f"Saved. Withdraw code: {wcode}")
-                st.toast("打印页已在新标签打开，打印或取消后标签将自动关闭。")
+                st.toast("PRINT CLICKED")
                 st.stop()
 
         st.caption(f"print_debug_ts={st.session_state.get('_print_debug_ts')}")
@@ -1951,7 +2047,12 @@ def _render_preview_page_by_rid(rid: int):
 
 
 def _render_print_page(rid: int) -> None:
-    """?print=1&rid= 时：从 receipt_print 表取 HTML，注入自动 print/close 脚本，只渲染小票（无 Streamlit UI）。"""
+    """?print=1&rid= 时：极简渲染，不显示主 UI/sidebar，只渲染一个 components.html（完整收据+自动打印/关闭脚本）。"""
+    # 极简渲染：隐藏 sidebar 和多余边距，仅保留收据 iframe
+    st.markdown(
+        '<style>[data-testid="stSidebar"]{display:none !important;} .main .block-container{padding-top:0.5rem !important;max-width:100% !important;}</style>',
+        unsafe_allow_html=True,
+    )
     html_content = get_receipt_print_html(rid)
     if not html_content or len(html_content) < 100:
         st.error("Print receipt not found or expired.")
@@ -1981,12 +2082,8 @@ def main():
     print_mode = params.get("print") in ("1", 1) and print_rid
 
     if print_mode:
-        try:
-            rid_int = int(print_rid)
-        except (ValueError, TypeError):
-            st.error("Invalid print rid.")
-            return
-        _render_print_page(rid_int)
+        # 已改为“点击触发新窗口写入小票”方案，不再走 print=1 打印页
+        st.info("请从开票页点击 **Print / Save Receipt** 打开打印。")
         return
 
     preview_token = params.get("preview_token") if params else None
