@@ -1850,6 +1850,7 @@ def ticketing_page():
         st.markdown("**Keypad**")
 
 <<<<<<< Current (Your changes)
+<<<<<<< Current (Your changes)
         # Target selector: Gross / Tare / Price
         _cur_target = st.session_state.get("key_target", "gross")
         _kt1, _kt2, _kt3 = st.columns(3, gap="small")
@@ -1867,6 +1868,8 @@ def ticketing_page():
                 st.session_state.key_target = "unit_price"
                 st.rerun()
 
+=======
+>>>>>>> Incoming (Background Agent changes)
 =======
 >>>>>>> Incoming (Background Agent changes)
         def keypad_append(ch: str):
