@@ -1303,12 +1303,13 @@ def focus_js(target: str, unique_id: int = 0):
     components.html(html, height=0)
 
 def enter_workflow_js():
-    """Gross Enter→Tare；Tare Enter→Confirm。合并 keydown/autocomplete/hide 到一个注入"""
+    """Gross Enter→Tare；Tare Enter→Confirm。含 transition buffer 防止 rerun 期间丢失输入"""
     html = """
     <script>
     (function(){
       var doc = window.parent.document;
-      // 工具函数
+      var pWin = window.parent;
+
       function findByLabel(kw) {
         var blocks = doc.querySelectorAll('[data-testid="stTextInput"]');
         for (var i = 0; i < blocks.length; i++) {
@@ -1332,22 +1333,74 @@ def enter_workflow_js():
         return lb ? lb.textContent.trim() : '';
       }
 
-      // Enter 处理 — 防止重复字符
-      // 标记：Enter 正在处理中，阻止 input 事件修改值
+      /* ── 步骤切换缓冲系统（一次初始化，挂在 parent window 上跨 iframe/rerun 持久） ── */
+      if (!doc.__ts) {
+        doc.__ts = { active: false, target: null, buf: [], timer: null };
+
+        pWin.__tsFlush = function() {
+          var ts = doc.__ts;
+          if (!ts.active || !ts.target) return false;
+          var blocks = doc.querySelectorAll('[data-testid="stTextInput"]');
+          var inp = null;
+          for (var i = 0; i < blocks.length; i++) {
+            var lb = blocks[i].querySelector('label');
+            if (lb && lb.textContent.indexOf(ts.target) >= 0) {
+              inp = blocks[i].querySelector('input');
+              break;
+            }
+          }
+          if (!inp || inp.disabled || !inp.isConnected) return false;
+
+          if (ts.buf.length > 0) {
+            var val = inp.value || '';
+            for (var j = 0; j < ts.buf.length; j++) {
+              var k = ts.buf[j];
+              if (k === 'del') val = val.slice(0, -1);
+              else if (k === '.' && val.indexOf('.') >= 0) continue;
+              else val += k;
+            }
+            var setter = Object.getOwnPropertyDescriptor(pWin.HTMLInputElement.prototype, 'value').set;
+            setter.call(inp, val);
+            inp.dispatchEvent(new Event('input', { bubbles: true }));
+            inp.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+          inp.focus();
+          doc.__kpLastInput = inp;
+          ts.active = false;
+          ts.buf = [];
+          ts.target = null;
+          if (ts.timer) { pWin.clearInterval(ts.timer); ts.timer = null; }
+          return true;
+        };
+
+        doc.addEventListener('keydown', function(e) {
+          var ts = doc.__ts;
+          if (!ts.active) return;
+          if ((e.key >= '0' && e.key <= '9') || e.key === '.') {
+            e.preventDefault(); e.stopImmediatePropagation();
+            ts.buf.push(e.key);
+          } else if (e.key === 'Backspace') {
+            e.preventDefault(); e.stopImmediatePropagation();
+            ts.buf.push('del');
+          }
+        }, true);
+      }
+
+      /* ── Enter 防重复字符保护 ── */
       if (!doc.__enterGuardBound) {
         doc.__enterGuardBound = true;
         doc.__enterFrozen = false;
         doc.__enterFrozenValue = '';
-        // 拦截 input 事件：Enter 处理期间冻结输入框的值
         doc.addEventListener('input', function(ev) {
           if (!doc.__enterFrozen) return;
           if (ev.target && ev.target.tagName === 'INPUT') {
-            var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            var setter = Object.getOwnPropertyDescriptor(pWin.HTMLInputElement.prototype, 'value').set;
             setter.call(ev.target, doc.__enterFrozenValue);
           }
         }, true);
       }
 
+      /* ── Enter keydown 主处理 ── */
       function onKey(e) {
         if (e.key !== 'Enter') return;
         var a = doc.activeElement;
@@ -1360,12 +1413,20 @@ def enter_workflow_js():
         e.stopImmediatePropagation();
         e.stopPropagation();
 
-        // 冻结当前值，防止任何后续 input 事件改变它
         doc.__enterFrozen = true;
         doc.__enterFrozenValue = a.value;
         a.blur();
 
         if (lbl.indexOf('Gross') >= 0) {
+          var ts = doc.__ts;
+          ts.active = true;
+          ts.target = 'Tare';
+          ts.buf = [];
+          if (ts.timer) pWin.clearInterval(ts.timer);
+          ts.timer = pWin.setInterval(function() { pWin.__tsFlush(); }, 50);
+          pWin.setTimeout(function() {
+            if (ts.active) { pWin.__tsFlush(); ts.active = false; ts.buf = []; if (ts.timer) { pWin.clearInterval(ts.timer); ts.timer = null; } }
+          }, 3000);
           var b = findBtn('\u2192Tare');
           if (b) b.click();
         } else if (lbl.indexOf('Tare') >= 0) {
@@ -1376,11 +1437,9 @@ def enter_workflow_js():
           if (g && !g.disabled) g.focus();
         }
 
-        // 短暂延迟后解冻（rerun 会替换 DOM，新的 input 不受影响）
-        setTimeout(function() { doc.__enterFrozen = false; }, 300);
+        pWin.setTimeout(function() { doc.__enterFrozen = false; }, 300);
       }
 
-      // keydown + keyup 双重拦截
       function onKeyUp(e) {
         if (e.key !== 'Enter') return;
         var a = doc.activeElement || e.target;
@@ -1400,7 +1459,10 @@ def enter_workflow_js():
       doc.addEventListener('keydown', onKey, true);
       doc.addEventListener('keyup', onKeyUp, true);
 
-      // 隐藏 switch 按钮行 + 关闭 autocomplete
+      /* ── 每次 rerun 立即尝试 flush（如果 transition 仍在进行） ── */
+      if (doc.__ts.active) pWin.__tsFlush();
+
+      /* ── 隐藏 switch 按钮行 + 关闭 autocomplete ── */
       setTimeout(function(){
         var b = findBtn('\u2192Tare');
         if (b) {
@@ -1903,6 +1965,11 @@ def ticketing_page():
     btn.addEventListener('mousedown', function(e) { e.preventDefault(); });
     btn.addEventListener('click', function() {
       var key = this.getAttribute('data-k');
+      var ts = doc.__ts;
+      if (ts && ts.active) {
+        ts.buf.push(key);
+        return;
+      }
       var input = getTarget();
       if (!input) return;
       var val = input.value || '';
