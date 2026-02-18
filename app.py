@@ -1332,29 +1332,73 @@ def enter_workflow_js():
         return lb ? lb.textContent.trim() : '';
       }
 
-      // Enter 处理
+      // Enter 处理 — 防止重复字符
+      // 标记：Enter 正在处理中，阻止 input 事件修改值
+      if (!doc.__enterGuardBound) {
+        doc.__enterGuardBound = true;
+        doc.__enterFrozen = false;
+        doc.__enterFrozenValue = '';
+        // 拦截 input 事件：Enter 处理期间冻结输入框的值
+        doc.addEventListener('input', function(ev) {
+          if (!doc.__enterFrozen) return;
+          if (ev.target && ev.target.tagName === 'INPUT') {
+            var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            setter.call(ev.target, doc.__enterFrozenValue);
+          }
+        }, true);
+      }
+
       function onKey(e) {
         if (e.key !== 'Enter') return;
         var a = doc.activeElement;
         if (!a || a.tagName !== 'INPUT') return;
         var lbl = labelOf(a);
+        var isTarget = lbl.indexOf('Gross') >= 0 || lbl.indexOf('Tare') >= 0 || lbl.indexOf('Price') >= 0;
+        if (!isTarget) return;
+
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        e.stopPropagation();
+
+        // 冻结当前值，防止任何后续 input 事件改变它
+        doc.__enterFrozen = true;
+        doc.__enterFrozenValue = a.value;
+        a.blur();
+
         if (lbl.indexOf('Gross') >= 0) {
-          e.preventDefault(); e.stopImmediatePropagation();
           var b = findBtn('\u2192Tare');
           if (b) b.click();
         } else if (lbl.indexOf('Tare') >= 0) {
-          e.preventDefault(); e.stopImmediatePropagation();
           var c = findBtn('Confirm');
           if (c) c.click();
         } else if (lbl.indexOf('Price') >= 0) {
-          e.preventDefault(); e.stopImmediatePropagation();
           var g = findByLabel('Gross');
           if (g && !g.disabled) g.focus();
         }
+
+        // 短暂延迟后解冻（rerun 会替换 DOM，新的 input 不受影响）
+        setTimeout(function() { doc.__enterFrozen = false; }, 300);
       }
+
+      // keydown + keyup 双重拦截
+      function onKeyUp(e) {
+        if (e.key !== 'Enter') return;
+        var a = doc.activeElement || e.target;
+        if (a && a.tagName === 'INPUT') {
+          var lbl = labelOf(a);
+          if (lbl.indexOf('Gross') >= 0 || lbl.indexOf('Tare') >= 0 || lbl.indexOf('Price') >= 0) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+          }
+        }
+      }
+
       if (doc.__enterHandler) doc.removeEventListener('keydown', doc.__enterHandler, true);
+      if (doc.__enterUpHandler) doc.removeEventListener('keyup', doc.__enterUpHandler, true);
       doc.__enterHandler = onKey;
+      doc.__enterUpHandler = onKeyUp;
       doc.addEventListener('keydown', onKey, true);
+      doc.addEventListener('keyup', onKeyUp, true);
 
       // 隐藏 switch 按钮行 + 关闭 autocomplete
       setTimeout(function(){
