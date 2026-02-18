@@ -2187,7 +2187,7 @@ def manage_receipt_detail_inquiry():
         LIMIT 500
     """, (from_str, to_str))
 
-    # ── Ticket Report 弹窗（点击时立即打开，不延迟）──
+    # ── Ticket Report 弹窗 ──
     if report_click:
         rows = qdf("""
             SELECT r.* FROM receipts r
@@ -2196,7 +2196,9 @@ def manage_receipt_detail_inquiry():
         """, (from_str, to_str)).to_dict("records")
         report_html = _rdi_build_report_html(from_str, to_str, rows)
         b64 = base64.b64encode(report_html.encode("utf-8")).decode("ascii")
-        js = f"""<script>
+        # 时间戳确保每次 HTML 不同，Streamlit 会重新执行 JS
+        ts = int(time.time() * 1000)
+        js = f"""<!-- ts={ts} --><script>
 (function() {{
   try {{
     var w = window.open('', '_blank');
