@@ -527,11 +527,6 @@ def ss_init():
     if "unit_price_input" not in st.session_state:
         st.session_state.unit_price_input = ""
 
-    if "_print_payload" not in st.session_state:
-        st.session_state._print_payload = None
-    if "_print_opened_once" not in st.session_state:
-        st.session_state._print_opened_once = False
-
 # -----------------------------
 # UI helpers
 # -----------------------------
@@ -545,12 +540,14 @@ def css():
         font-size: clamp(0.875rem, 1.5vw + 0.75rem, 1.25rem) !important;
       }
       div.block-container {
-        padding-top: 1rem !important;
+        padding-top: 0.3rem !important;
+        padding-bottom: 0 !important;
         max-width: 100% !important;
       }
+      
 
       .topbar{
-        height: 2.75rem;
+        height: 2.2rem;
         background:#2f2f2f;
         color:#fff;
         display:flex;
@@ -558,7 +555,7 @@ def css():
         justify-content:space-between;
         padding:0 0.875rem;
         border-radius:0.375rem;
-        margin-bottom:0.625rem;
+        margin-bottom:0.2rem;
         font-weight:800;
         font-size: 1em;
       }
@@ -572,6 +569,9 @@ def css():
       }
       .subtle{ color:#6b7280; font-size: 0.875em; }
 
+      /* 紧凑标题 */
+      h3 { font-size: 1rem !important; margin: 0 0 0.2rem 0 !important; }
+
       [data-testid="stDataFrame"] td,
       [data-testid="stDataFrame"] th {
         white-space: nowrap !important;
@@ -579,7 +579,7 @@ def css():
       }
       [data-testid="stDataFrame"] { font-size: 1em !important; }
 
-      [data-testid="stVerticalBlock"] { gap: 0.35rem !important; }
+      [data-testid="stVerticalBlock"] { gap: 0.3rem !important; }
 
       [data-testid="stTextInput"] input:placeholder-shown {
         background: transparent !important;
@@ -607,10 +607,32 @@ def css():
         box-shadow: none !important;
       }
 
-      /* Receiving Area 右侧区：Keypad 等按钮稍高，触屏好按 */
+      /* Receiving Area 右侧区：按钮触屏友好 */
       [data-testid="stHorizontalBlock"] > div:nth-child(3) [data-testid="stButton"] button {
-        min-height: 3.25rem !important;
-        padding: 0.6rem 0.75rem !important;
+        min-height: 2.5rem !important;
+        padding: 0.4rem 0.6rem !important;
+      }
+
+      /* 立即通过 CSS 隐藏 switch 按钮行（→Tare / →Gross / TareKey），
+         避免每次 rerun 等待 50ms JS 执行期间出现布局跳动。
+         :not(:has(stHorizontalBlock)) 确保只匹配最内层的横向块，不误伤外层三栏布局 */
+      [data-testid="stHorizontalBlock"]:not(:has([data-testid="stHorizontalBlock"])):has(#switch-btns-marker) {
+        position: absolute !important;
+        width: 1px !important;
+        height: 1px !important;
+        overflow: hidden !important;
+        opacity: 0 !important;
+        left: -9999px !important;
+      }
+
+      /* height=0 的 components.html iframe 不应产生额外间距 */
+      [data-testid="stCustomComponentV1"] iframe[height="0"],
+      [data-testid="stHtml"] iframe[height="0"] {
+        display: block !important;
+        min-height: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        border: none !important;
       }
     </style>
     """, unsafe_allow_html=True)
@@ -856,115 +878,152 @@ def build_receipt_html_for_print(
     paid_amount: float = 0.0,
     balance_amount: float = 0.0,
 ):
-    """返回完整合法 HTML 文档，仅含小票内容；<style> 内仅合法 CSS，无行尾中文。"""
-    rows_html = ""
+    """返回完整合法 HTML 文档（ScrapGoGo 风格小票排版）。"""
+
+    # 生成明细行 HTML + 汇总
+    items_html = ""
+    sum_gross = sum_tare = sum_net = sum_total = 0.0
     for r in lines_df.itertuples(index=False):
-        rows_html += f"""
-        <tr>
-          <td style="padding:6px 0; font-weight:700;">{html.escape(str(r.material))}</td>
-        </tr>
-        <tr>
-          <td>
-            <table style="width:100%; border-collapse:collapse; font-size:12px;">
-              <tr>
-                <td>GROSS</td><td style="text-align:right;">{float(r.gross):.0f}</td>
-                <td>TARE</td><td style="text-align:right;">{float(r.tare):.0f}</td>
-              </tr>
-              <tr>
-                <td>NET</td><td style="text-align:right;">{float(r.net):.0f}</td>
-                <td>PRICE</td><td style="text-align:right;">{float(r.unit_price):.3f}/Lb</td>
-              </tr>
-              <tr>
-                <td colspan="3" style="font-weight:700;">TOTAL</td>
-                <td style="text-align:right; font-weight:800;">{float(r.total):.2f}</td>
-              </tr>
-            </table>
-            <div style="border-bottom:1px solid #000; margin:6px 0;"></div>
-          </td>
-        </tr>
-        """
+        g = float(r.gross)
+        t = float(r.tare)
+        n = float(r.net)
+        p = float(r.unit_price)
+        tot = float(r.total)
+        sum_gross += g
+        sum_tare += t
+        sum_net += n
+        sum_total += tot
+        items_html += f"""
+          <tr><td colspan="5" style="text-decoration:underline; font-weight:700; padding-top:4px;">{html.escape(str(r.material))}</td></tr>
+          <tr>
+            <td style="text-align:right;">{g:.0f}</td>
+            <td style="text-align:right;">{t:.0f}</td>
+            <td style="text-align:right;">{n:.0f}</td>
+            <td style="text-align:right;">{p:.3f}/Lb</td>
+            <td style="text-align:right;">{tot:.2f}</td>
+          </tr>"""
 
-    html_doc = f"""
-    <!doctype html>
-    <html>
-    <head>
-      <meta charset="utf-8" />
-      <title>Receipt</title>
-      <style>
-        @page {{ size: auto; margin: 10mm; }}
-        @media print {{ body {{ margin: 0; padding: 0; background: #fff; }} }}
-        body {{
-          font-family: Arial, Helvetica, sans-serif;
-          color: #000;
-          margin: 0;
-          padding: 0;
-          background: #fff;
-        }}
-        .ticket {{
-          width: 280px;
-          margin: 0 auto;
-        }}
-        .center {{ text-align: center; }}
-        .hr {{ border-top: 1px solid #000; margin: 8px 0; }}
-        table {{ width: 100%; border-collapse: collapse; }}
-        th, td {{ border: 1px solid #000; }}
-        .receipt-table-wrap {{ overflow-x: auto; }}
-        .receipt-table-wrap table td {{ white-space: nowrap; }}
-        .amount-bold {{ font-weight: 800; }}
-      </style>
-    </head>
-    <body>
-      <div class="ticket">
-        <div class="center" style="font-weight:900; font-size:18px;">{html.escape(company_name)}</div>
-        <div class="center" style="font-weight:800;">RC {html.escape(ticket_number)}</div>
-        <div class="center" style="font-size:12px;">{html.escape(email)}</div>
+    html_doc = f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Receipt</title>
+  <style>
+    @page {{ size: auto; margin: 10mm; }}
+    @media print {{ body {{ margin: 0; padding: 0; background: #fff; }} }}
+    body {{
+      font-family: Arial, Helvetica, sans-serif;
+      color: #000;
+      margin: 0;
+      padding: 0;
+      background: #fff;
+    }}
+    .ticket {{
+      width: 280px;
+      margin: 0 auto;
+      font-size: 12px;
+      line-height: 1.45;
+    }}
+    .center {{ text-align: center; }}
+    .hr {{ border-top: 1px solid #000; margin: 6px 0; }}
+    .kv {{ display: flex; justify-content: space-between; }}
+    .kv b {{ white-space: nowrap; }}
+    .items-table {{
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }}
+    .items-table td, .items-table th {{
+      border: none;
+      padding: 1px 2px;
+    }}
+    .items-table th {{
+      text-align: right;
+      font-weight: 700;
+      text-decoration: underline;
+    }}
+    .items-table th:first-child {{ text-align: right; }}
+    .summary-row td {{
+      font-weight: 700;
+      padding-top: 3px;
+    }}
+  </style>
+</head>
+<body>
+  <div class="ticket">
+    <div class="center" style="font-weight:900; font-size:16px;">{html.escape(company_name)}</div>
+    <div class="center" style="font-weight:800;">RC {html.escape(ticket_number)}</div>
+    <div class="center">{html.escape(email)}</div>
 
-        <div class="hr"></div>
+    <div class="hr"></div>
 
-        <div style="font-size:12px; line-height:1.5;">
-          <div><b>Ticket Number :</b> {html.escape(ticket_number)}</div>
-          <div><b>Start Date :</b> {html.escape(issue_time)}</div>
-          <div><b>By :</b> {html.escape(cashier)}</div>
-          <div><b>Name :</b> {html.escape(client_name)}</div>
-        </div>
+    <div class="kv"><b>Ticket Number :-</b><span>{html.escape(ticket_number)}</span></div>
+    <div class="kv"><b>Start Date :-</b><span>{html.escape(issue_time)}</span></div>
+    <div class="kv"><b>End Date :-</b><span></span></div>
+    <div class="kv"><b>By :-</b><span>{html.escape(cashier)}</span></div>
+    <div class="kv"><b>Hold Until :-</b><span></span></div>
 
-        <div class="hr"></div>
+    <div class="hr"></div>
 
-        <div class="receipt-table-wrap">
-        <table style="font-size:12px;">
-          {rows_html}
-        </table>
-        </div>
+    <table class="items-table">
+      <tr>
+        <th style="text-align:right;">GROSS</th>
+        <th style="text-align:right;">TARE</th>
+        <th style="text-align:right;">NET</th>
+        <th style="text-align:right;">PRICE</th>
+        <th style="text-align:right;">TOTAL</th>
+      </tr>
+      {items_html}
+    </table>
 
-        <div class="hr"></div>
+    <div class="hr"></div>
 
-        <div style="font-size:12px; line-height:1.6;">
-          <div><b>Total Amount :</b> <span style="float:right;">{total_amount:.2f}</span></div>
-          <div><b>Rounding Amount :</b> <span style="float:right;">{rounding_amount:.2f}</span></div>
-          <div><b>Adjustment Amount :</b> <span style="float:right;">{adjustment_amount:.2f}</span></div>
-          <div><b>Paid Amount :</b> <span style="float:right;">{paid_amount:.2f}</span></div>
-          <div><b>Balance Amount :</b> <span class="amount-bold" style="float:right;">{balance_amount:.2f}</span></div>
-        </div>
+    <table class="items-table">
+      <tr class="summary-row">
+        <td style="text-align:right;">{sum_gross:.0f}</td>
+        <td style="text-align:right;">{sum_tare:.0f}</td>
+        <td style="text-align:right;">{sum_net:.0f}</td>
+        <td></td>
+        <td style="text-align:right;">{sum_total:,.2f}</td>
+      </tr>
+    </table>
 
-        <div class="hr"></div>
+    <div class="hr"></div>
 
-        <div style="font-size:11px; line-height:1.4;">
-          I, the seller, testifies that these items are not stolen, and I have full ownership,
-          and I convey the ownership of, and interest in this sale to {html.escape(company_name)}.
-        </div>
+    <div class="kv"><b>Total Amount :-</b><span>{total_amount:,.2f}</span></div>
+    <div class="kv"><b>Rounding Amount :-</b><span>{rounding_amount:,.2f}</span></div>
+    <div class="kv"><b>Adjustment Amount:-</b><span>{adjustment_amount:,.2f}</span></div>
+    <div class="kv"><b>Paid Amount :-</b><span>{paid_amount:,.2f}</span></div>
+    <div class="kv"><b>Balance Amount :-</b><span style="font-weight:800;">{balance_amount:,.2f}</span></div>
 
-        <div class="hr"></div>
+    <div class="hr"></div>
 
-        <div style="font-size:12px;">
-          <div><b>Print Name :</b></div>
-          <div style="height:26px;"></div>
-          <div><b>Sign :</b></div>
-          <div style="height:40px;"></div>
-        </div>
-      </div>
-    </body>
-    </html>
-    """
+    <div class="kv"><b>Name :-</b><span>{html.escape(client_name)}</span></div>
+    <div class="kv"><b>DL # :-</b><span></span></div>
+
+    <div class="hr"></div>
+
+    <div style="font-size:11px; line-height:1.4;">
+      I, the seller, testifies that these items are not stolen, and I
+      have full ownership, and I convey the ownership of, and interest in
+      these items in this sale to YG Eco Metal Inc.
+    </div>
+
+    <div style="margin-top:6px; font-weight:700;">{html.escape(company_name)}</div>
+
+    <div class="kv" style="margin-top:6px;"><b>Print Name :-</b><span>{html.escape(client_name)}</span></div>
+    <div class="kv"><b>Sign :-</b><span></span></div>
+    <div style="height:30px;"></div>
+
+    <div class="hr"></div>
+
+    <div class="center" style="font-size:11px; margin-top:4px;">www.ygMetals.com</div>
+    <div class="center" style="font-size:10px; font-style:italic; margin-top:4px;">
+      Powered by BuyScrapApp.com software for<br/>recycling companies
+    </div>
+  </div>
+</body>
+</html>"""
     match = re.search(r"<style>(.*?)</style>", html_doc, re.DOTALL)
     if match:
         clean_style = _sanitize_style_block(match.group(1))
@@ -1211,173 +1270,105 @@ def add_line_to_receipt(override_gross=None, override_tare=None, override_unit_p
     st.session_state.focus_request = "gross"
 
 def focus_js(target: str, unique_id: int = 0):
-    """选 item 后自动聚焦到 Gross 或 Tare；只抢焦一次，之后不抢，方便用户再点 Gross"""
-    idx = 1 if target == "gross" else 2  # 0=Unit Price, 1=Gross, 2=Tare
+    """选 item 后自动聚焦到 Gross 或 Tare（按标签文本查找，不依赖索引）"""
+    label_keyword = "Gross" if target == "gross" else "Tare"
     html = f"""
     <!-- focus_{unique_id} -->
     <script>
-      (function(){{
-        var didFocus = false;
-        function findInput(doc) {{
-          var m = doc.getElementById('scrap-gross-tare-marker');
-          if (!m) return null;
-          var form = m.closest('form') || m.parentElement;
-          while (form && form !== doc.body) {{
-            var inputs = form.querySelectorAll('input:not([type="hidden"]):not([type="checkbox"])');
-            if (inputs.length >= 3 && {idx} < inputs.length) return inputs[{idx}];
-            form = form.parentElement;
+    (function(){{
+      var doc = window.parent.document;
+      var done = false;
+      function go() {{
+        if (done) return;
+        var blocks = doc.querySelectorAll('[data-testid="stTextInput"]');
+        for (var i = 0; i < blocks.length; i++) {{
+          var lb = blocks[i].querySelector('label');
+          if (lb && lb.textContent.indexOf('{label_keyword}') >= 0) {{
+            var inp = blocks[i].querySelector('input');
+            if (inp && !inp.disabled) {{
+              inp.focus();
+              doc.__kpLastInput = inp;
+              done = true;
+              return;
+            }}
           }}
-          return null;
         }}
-        function tryFocus() {{
-          if (didFocus) return true;
-          var doc = window.parent.document;
-          if (!doc.getElementById('scrap-gross-tare-marker')) doc = window.top.document;
-          var el = findInput(doc);
-          if (el) {{ el.focus(); didFocus = true; return true; }}
-          return false;
-        }}
-        var n = 0;
-        function startPoll() {{
-          var t = setInterval(function() {{
-            n++;
-            if (tryFocus() || n > 100) clearInterval(t);
-          }}, 80);
-        }}
-        setTimeout(startPoll, 50);
-        setTimeout(startPoll, 300);
-        setTimeout(startPoll, 800);
-      }})();
+      }}
+      go();
+      if (!done) setTimeout(go, 30);
+      if (!done) setTimeout(go, 100);
+    }})();
     </script>
     """
     components.html(html, height=0)
 
 def enter_workflow_js():
-    """Gross Enter → Tare；Tare Enter → Confirm。Enter 在 Gross 时点 →Tare 更新 key_target，再 focus Tare"""
+    """Gross Enter→Tare；Tare Enter→Confirm。合并 keydown/autocomplete/hide 到一个注入"""
     html = """
     <script>
-      (function(){
-        var doc = window.parent.document;
-        if (!doc.getElementById('scrap-gross-tare-marker')) doc = window.top.document;
-        function getGrossTare(){
-          var m = doc.getElementById('scrap-gross-tare-marker');
-          if (m) {
-            var form = m.closest('form') || m.parentElement;
-            while (form && form !== doc.body) {
-              var inputs = form.querySelectorAll('input:not([type="hidden"]):not([type="checkbox"])');
-              if (inputs.length >= 3) return { g: inputs[1], t: inputs[2] };
-              form = form.parentElement;
-            }
-          }
-          var blocks = doc.querySelectorAll('[data-testid="stTextInput"]');
-          var g = null, t = null;
-          for (var i = 0; i < blocks.length; i++) {
-            var lb = blocks[i].querySelector('label');
-            var lbl = (lb && lb.textContent) ? lb.textContent.trim() : '';
-            if (lbl.indexOf('Gross') >= 0) g = blocks[i].querySelector('input');
-            if (lbl.indexOf('Tare') >= 0) t = blocks[i].querySelector('input');
-          }
-          return { g: g, t: t };
+    (function(){
+      var doc = window.parent.document;
+      // 工具函数
+      function findByLabel(kw) {
+        var blocks = doc.querySelectorAll('[data-testid="stTextInput"]');
+        for (var i = 0; i < blocks.length; i++) {
+          var lb = blocks[i].querySelector('label');
+          if (lb && lb.textContent.indexOf(kw) >= 0) return blocks[i].querySelector('input');
         }
-        function findBtn(txt){
-          var btns = doc.querySelectorAll('button');
-          for(var i=0; i<btns.length; i++){
-            var t = (btns[i].innerText || btns[i].textContent || '').trim();
-            if(t.indexOf(txt) !== -1) return btns[i];
-          }
-          return null;
+        return null;
+      }
+      function findBtn(txt) {
+        var btns = doc.querySelectorAll('button');
+        for (var i = 0; i < btns.length; i++) {
+          if ((btns[i].textContent || '').indexOf(txt) >= 0) return btns[i];
         }
-        function isReceivingInput(el) {
-          var r = getGrossTare();
-          if (!r.g || !r.t) return false;
-          if (el === r.g || el === r.t) return true;
-          var m = doc.getElementById('scrap-gross-tare-marker');
-          if (m) {
-            var form = m.closest('form');
-            if (form) {
-              var inputs = form.querySelectorAll('input:not([type="hidden"]):not([type="checkbox"])');
-              for (var i = 0; i < inputs.length; i++) { if (el === inputs[i]) return true; }
-            }
-          }
-          return false;
+        return null;
+      }
+      function labelOf(el) {
+        if (!el) return '';
+        var w = el.closest('[data-testid="stTextInput"]');
+        if (!w) return '';
+        var lb = w.querySelector('label');
+        return lb ? lb.textContent.trim() : '';
+      }
+
+      // Enter 处理
+      function onKey(e) {
+        if (e.key !== 'Enter') return;
+        var a = doc.activeElement;
+        if (!a || a.tagName !== 'INPUT') return;
+        var lbl = labelOf(a);
+        if (lbl.indexOf('Gross') >= 0) {
+          e.preventDefault(); e.stopImmediatePropagation();
+          var b = findBtn('\u2192Tare');
+          if (b) b.click();
+        } else if (lbl.indexOf('Tare') >= 0) {
+          e.preventDefault(); e.stopImmediatePropagation();
+          var c = findBtn('Confirm');
+          if (c) c.click();
+        } else if (lbl.indexOf('Price') >= 0) {
+          e.preventDefault(); e.stopImmediatePropagation();
+          var g = findByLabel('Gross');
+          if (g && !g.disabled) g.focus();
         }
-        function onKeyDown(e){
-          var active = doc.activeElement;
-          if (e.key === 'Enter') {
-            var r = getGrossTare();
-            if (!r.g || !r.t) return;
-            if (active === r.g) {
-              e.preventDefault();
-              e.stopPropagation();
-              var toTare = findBtn('→Tare');
-              if (toTare) toTare.click();
-            } else if (active === r.t) {
-              e.preventDefault();
-              e.stopPropagation();
-              var c = findBtn('Confirm');
-              if (c) c.click();
-            }
-            return;
-          }
-          if (!isReceivingInput(active)) return;
-          if (e.key === 'Backspace') {
-            e.preventDefault();
-            e.stopPropagation();
-            var delBtn = findBtn('delete');
-            if (delBtn) delBtn.click();
-            return;
-          }
-          if ('0123456789.'.indexOf(e.key) >= 0) {
-            e.preventDefault();
-            e.stopPropagation();
-            var numBtn = null;
-            var btns = doc.querySelectorAll('button');
-            for (var i = 0; i < btns.length; i++) {
-              var bt = (btns[i].innerText || btns[i].textContent || '').trim();
-              if (bt === e.key) { numBtn = btns[i]; break; }
-            }
-            if (numBtn) numBtn.click();
-            return;
-          }
+      }
+      if (doc.__enterHandler) doc.removeEventListener('keydown', doc.__enterHandler, true);
+      doc.__enterHandler = onKey;
+      doc.addEventListener('keydown', onKey, true);
+
+      // 隐藏 switch 按钮行 + 关闭 autocomplete
+      setTimeout(function(){
+        var b = findBtn('\u2192Tare');
+        if (b) {
+          var row = b.closest('[data-testid="stHorizontalBlock"]');
+          if (row) row.style.cssText = 'position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden;opacity:0';
         }
-        if (!doc.__enterBound) {
-          doc.__enterBound = true;
-          doc.addEventListener('keydown', onKeyDown, true);
-        }
-        // 点击 Gross 时更新 key_target 为 gross，点击 Tare 时仅更新 key_target（不抢焦）
-        function bindFocusSync() {
-          var r = getGrossTare();
-          if (!r.g || !r.t) return;
-          r.g.addEventListener('focus', function(){ var b = findBtn('→Gross'); if(b) b.click(); });
-          r.t.addEventListener('focus', function(){ var b = findBtn('TareKey'); if(b) b.click(); });
-        }
-        setTimeout(bindFocusSync, 100);
-        setTimeout(bindFocusSync, 400);
-        // 隐藏 →Tare / →Gross 按钮（JS 仍可 programmatic click）
-        setTimeout(function(){
-          var toTare = findBtn('→Tare');
-          if (toTare) {
-            var block = toTare.closest('[data-testid="stHorizontalBlock"]');
-            if (block) block.style.cssText = 'position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden;opacity:0';
-          }
-        }, 50);
-        // 屏蔽浏览器记忆/自动补全（Unit Price、Gross、Tare）
-        function disableAutocomplete(){
-          var m = doc.getElementById('scrap-gross-tare-marker');
-          if (m) {
-            var form = m.closest('form') || m.parentElement;
-            while (form && form !== doc.body) {
-              var inputs = form.querySelectorAll('input:not([type="hidden"]):not([type="checkbox"])');
-              for (var i = 0; i < inputs.length; i++) {
-                inputs[i].setAttribute('autocomplete', 'off');
-              }
-              return;
-            }
-          }
-        }
-        setTimeout(disableAutocomplete, 100);
-        setTimeout(disableAutocomplete, 400);
-      })();
+        ['Price','Gross','Tare'].forEach(function(kw) {
+          var inp = findByLabel(kw);
+          if (inp) inp.setAttribute('autocomplete', 'off');
+        });
+      }, 20);
+    })();
     </script>
     """
     components.html(html, height=0)
@@ -1387,23 +1378,6 @@ def enter_workflow_js():
 # -----------------------------
 def ticketing_page():
     topbar("开票")
-
-    # --- one-shot print execution (two-phase rerun) ---
-    if st.session_state.get("_print_payload") and not st.session_state.get("_print_opened_once"):
-        st.session_state._print_opened_once = True
-        open_print_window(st.session_state._print_payload)
-        st.session_state.receipt_df = pd.DataFrame(columns=["Del", "material", "unit_price", "gross", "tare", "net", "total"])
-        st.session_state.picked_material_id = None
-        st.session_state.picked_material_name = ""
-        st.session_state.unit_price_input = ""
-        st.session_state.gross_input = ""
-        st.session_state.tare_input = ""
-        st.session_state.key_target = "gross"
-        st.session_state.focus_request = "gross"
-        st.session_state._entered_tare_for_line = False
-        st.session_state._keypad_pending = None
-        st.session_state._print_payload = None
-        st.rerun()
 
     clients = qdf("SELECT code, name, phone FROM clients WHERE deleted=0 ORDER BY id DESC")
     operators = qdf("SELECT email, name FROM operators WHERE deleted=0 ORDER BY id DESC")
@@ -1423,28 +1397,42 @@ def ticketing_page():
         st.markdown("### Receipt Preview Area")
         st.markdown('<div class="box">', unsafe_allow_html=True)
 
+        # 处理上一轮保存后待打印的小票：注入打印窗口 JS 并显示成功提示
+        if st.session_state.get("_pending_print_html"):
+            open_print_window(st.session_state._pending_print_html)
+            _wcode = st.session_state.get("_pending_print_wcode", "")
+            st.success(f"Saved. Withdraw code: {_wcode}")
+            del st.session_state["_pending_print_html"]
+            if "_pending_print_wcode" in st.session_state:
+                del st.session_state["_pending_print_wcode"]
+
         csel = clients[clients["code"] == st.session_state.ticket_client_code]
         clabel = "(未选择)"
         if len(csel) > 0:
             clabel = f'{csel.iloc[0]["name"]}'.strip()
 
-        st.markdown(f"<div class='subtle'>Client:</div><div style='font-weight:900'>{clabel}</div>", unsafe_allow_html=True)
-        st.markdown(f"<div class='subtle' style='margin-top:0.375rem'>Subtotal:</div>"
-                    f"<div style='font-size:1.75rem;font-weight:950'>${current_subtotal():.2f}</div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div style='line-height:1.4;margin-bottom:8px;'>"
+            f"<span style='color:#6b7280;font-size:0.8em;'>Client:</span><br>"
+            f"<span style='font-weight:900;'>{clabel}</span><br>"
+            f"<span style='color:#6b7280;font-size:0.8em;'>Subtotal:</span><br>"
+            f"<span style='font-size:1.3rem;font-weight:950;'>${current_subtotal():.2f}</span>"
+            f"</div>",
+            unsafe_allow_html=True
+        )
 
         df = recompute_receipt_df(st.session_state.receipt_df)
         if "Del" not in df.columns:
             df.insert(0, "Del", False)
             st.session_state.receipt_df = df
 
-        st.write("")
         if df.empty:
             st.info("No items yet.")
         else:
             edited = st.data_editor(
                 df,
                 use_container_width=True,
-                height=420,
+                height=180,
                 hide_index=True,
                 key="receipt_data_editor",
                 column_config={
@@ -1469,7 +1457,6 @@ def ticketing_page():
             if not edited[["unit_price", "gross", "tare"]].equals(df[["unit_price", "gross", "tare"]]):
                 st.rerun()
 
-        st.write("")
         colA, colB = st.columns(2)
         with colA:
             if st.button("Clear Receipt", use_container_width=True):
@@ -1545,8 +1532,18 @@ def ticketing_page():
                     st.error("receipt_html empty/too short")
                     st.stop()
 
-                st.session_state._print_payload = receipt_html
-                st.session_state._print_opened_once = False
+                # 把打印 HTML 暂存到 session_state，清空小票后 rerun；
+                # 下一次渲染时再注入打印窗口 JS，避免 st.stop() 导致中间/右侧区域不显示
+                st.session_state._pending_print_html = receipt_html
+                st.session_state._pending_print_wcode = wcode
+
+                # 清空小票数据（与 Clear Receipt 相同逻辑）
+                st.session_state.receipt_df = pd.DataFrame(
+                    columns=["Del", "material", "unit_price", "gross", "tare", "net", "total"]
+                )
+                for k in ("_pending_preview_b64", "_pending_preview_token", "_print_diag"):
+                    if k in st.session_state:
+                        del st.session_state[k]
                 st.rerun()
 
         st.caption(f"print_debug_ts={st.session_state.get('_print_debug_ts')}")
@@ -1556,7 +1553,6 @@ def ticketing_page():
 
     # ---------- middle: Material List Area
     with mid:
-        st.markdown("<div style='margin-top:1.5rem;'></div>", unsafe_allow_html=True)
         st.markdown("### Material List Area")
         st.markdown('<div class="box">', unsafe_allow_html=True)
 
@@ -1592,26 +1588,20 @@ def ticketing_page():
                             st.session_state.key_target = "gross"
                             st.rerun()
 
-        st.markdown(
-            "<hr style='margin:3rem 0 0.25rem; border:none; border-top:1px solid #e5e7eb;'>",
-            unsafe_allow_html=True
-        )
-        st.markdown(
-            "<div style='min-height:120px;'></div>",
-            unsafe_allow_html=True
-        )
+        st.markdown("<hr style='margin:0.5rem 0;border:none;border-top:1px solid #e5e7eb;'>", unsafe_allow_html=True)
+        st.markdown("<div style='min-height:40px;'></div>", unsafe_allow_html=True)
         cam1, cam2 = st.columns(2, gap="small")
         with cam1:
             st.markdown(
-                '<div style="aspect-ratio:1; width:100%; max-width:100%; border:1px dashed #9ca3af; border-radius:0.25rem; '
-                'display:flex; align-items:center; justify-content:center; color:#6b7280; font-size:0.875em;">'
+                '<div style="height:120px;width:100%;border:1px dashed #9ca3af;border-radius:0.25rem;'
+                'display:flex;align-items:center;justify-content:center;color:#6b7280;font-size:0.875em;">'
                 '📷 摄像头 1</div>',
                 unsafe_allow_html=True
             )
         with cam2:
             st.markdown(
-                '<div style="aspect-ratio:1; width:100%; max-width:100%; border:1px dashed #9ca3af; border-radius:0.25rem; '
-                'display:flex; align-items:center; justify-content:center; color:#6b7280; font-size:0.875em;">'
+                '<div style="height:120px;width:100%;border:1px dashed #9ca3af;border-radius:0.25rem;'
+                'display:flex;align-items:center;justify-content:center;color:#6b7280;font-size:0.875em;">'
                 '📷 摄像头 2</div>',
                 unsafe_allow_html=True
             )
@@ -1690,7 +1680,6 @@ def ticketing_page():
                         st.session_state._show_add_client = False
                         st.rerun()
 
-        st.write("")
         st.markdown("**Material :**")
         if st.session_state.picked_material_name:
             st.success(st.session_state.picked_material_name)
@@ -1702,9 +1691,13 @@ def ticketing_page():
         # ✅ 先处理「切到 Gross/Tare」按钮（放在最前），这样和 keypad 同一点时 delete 会作用到 Gross
         _sw_hide, _sw_main = st.columns([0.001, 99])
         with _sw_hide:
+            st.markdown('<div id="switch-btns-marker"></div>', unsafe_allow_html=True)
             _to_tare = st.button("→Tare", key="switch_to_tare", help="Enter from Gross 时自动触发")
             _to_gross = st.button("→Gross", key="switch_to_gross", help="点击 Gross 时自动触发")
             _to_tare_key = st.button("TareKey", key="switch_to_tare_key", help="点击 Tare 时仅更新 key_target")
+            _to_uprice = st.button("UPriceKey", key="switch_to_uprice", help="点击 Unit Price 时更新 key_target")
+        if _to_uprice:
+            st.session_state.key_target = "unit_price"
         if _to_gross:
             st.session_state.key_target = "gross"
         if _to_tare:
@@ -1722,87 +1715,57 @@ def ticketing_page():
 
         # ✅ 不因 →Tare 而 rerun，避免未提交的表单导致 session_state 里 unit_price 丢失；focus_js 本 run 末尾会执行
 
-        # ✅ 先保存当前值：若本 run 是 form 提交触发的，后面处理 _keypad_pending 可能覆盖，Confirm 时用此快照
-        st.session_state._saved_confirm_snapshot = (
-            (st.session_state.get("gross_input") or ""),
-            (st.session_state.get("tare_input") or ""),
-            (st.session_state.get("unit_price_input") or ""),
-        )
-
-        # ✅ 在表单创建前应用 keypad 按键；若本 run 刚点了 →Gross，delete/输入应对 Gross 生效
-        if st.session_state._keypad_pending:
-            act, tgt, ch = st.session_state._keypad_pending
-            st.session_state._keypad_pending = None
-            if _to_gross and tgt == "tare":
-                tgt = "gross"
-            if _to_tare_key and tgt == "gross":
-                tgt = "tare"
-            key_map = {"gross": "gross_input", "tare": "tare_input", "unit_price": "unit_price_input"}
-            skey = key_map.get(tgt, "gross_input")
-            s = (st.session_state.get(skey) or "") or ""
-            if act == "append" and ch and ch in "0123456789." and (ch != "." or "." not in s):
-                # Tare/Gross 若当前仅 "0"，首位输 1–9 时用替换，避免出现 "025"
-                if skey in ("tare_input", "gross_input") and s.strip() == "0" and ch in "123456789":
-                    st.session_state[skey] = ch
-                else:
-                    st.session_state[skey] = s + ch
-            elif act == "backspace":
-                st.session_state[skey] = s[:-1]
-            st.session_state.focus_request = tgt if tgt in ("gross", "tare") else "gross"
-
-        # ✅ 控件创建前清零（不能在 form 渲染后改 session_state）
+        # ✅ 控件创建前清零
         if st.session_state._reset_line_fields:
             st.session_state.gross_input = ""
             st.session_state.tare_input = ""
             st.session_state._reset_line_fields = False
             st.session_state._entered_tare_for_line = False
-            st.session_state._form_reset_key = st.session_state.get("_form_reset_key", 0) + 1
         if st.session_state.get("_clear_all_line_fields"):
             st.session_state.unit_price_input = ""
             st.session_state.gross_input = ""
             st.session_state.tare_input = ""
             st.session_state._clear_all_line_fields = False
-            st.session_state._form_reset_key = st.session_state.get("_form_reset_key", 0) + 1
-        # ✅ Tare 在「应为空白」时与 Gross 同一步清空，避免 Confirm 后 Tare 清空有延迟
         if not st.session_state.get("_entered_tare_for_line"):
             st.session_state.tare_input = ""
 
-        _form_key = f"line_entry_form_{st.session_state.get('_form_reset_key', 0)}"
-        with st.form(_form_key, clear_on_submit=False):
-            st.markdown('<div id="scrap-gross-tare-marker" style="display:none"></div>', unsafe_allow_html=True)
-            cA, cB, cC = st.columns([1.0, 1.0, 1.0], gap="small")
-            with cA:
-                # 仅选中产品时显示 Unit Price，否则空白
-                unit_price_val = (st.session_state.get("unit_price_input") or "") if st.session_state.get("picked_material_id") else ""
-                st.text_input(
-                    "Unit Price ($)",
-                    value=unit_price_val,
-                    disabled=not allow_price_edit,
-                    key="unit_price_input",
-                )
-            with cB:
-                st.text_input(
-                    "Gross (LB)",
-                    value=st.session_state.get("gross_input", ""),
-                    key="gross_input",
-                )
-            with cC:
-                # Tare：空白时用「随 _form_reset_key 变化的 key」强制新建控件，避免沿用旧状态造成延迟
-                _fk = st.session_state.get("_form_reset_key", 0)
-                if st.session_state.get("_entered_tare_for_line"):
-                    st.text_input("Tare (LB)", value=st.session_state.get("tare_input", ""), key="tare_input")
-                else:
-                    st.text_input("Tare (LB)", value="", key=f"tare_input_blank_{_fk}")
+        # ── 输入区域（不使用 st.form，普通 widget 能实时同步键盘编辑到 session_state）──
+        st.markdown('<div id="scrap-gross-tare-marker" style="display:none"></div>', unsafe_allow_html=True)
+        cA, cB, cC = st.columns([1.0, 1.0, 1.0], gap="small")
+        with cA:
+            unit_price_val = (st.session_state.get("unit_price_input") or "") if st.session_state.get("picked_material_id") else ""
+            st.text_input(
+                "Unit Price ($)",
+                value=unit_price_val,
+                disabled=not allow_price_edit,
+                key="unit_price_input",
+            )
+        with cB:
+            st.text_input(
+                "Gross (LB)",
+                value=st.session_state.get("gross_input", ""),
+                key="gross_input",
+            )
+        with cC:
+            _tare_display = st.session_state.get("tare_input", "") if st.session_state.get("_entered_tare_for_line") else ""
+            if st.session_state.get("_entered_tare_for_line"):
+                st.text_input("Tare (LB)", value=_tare_display, key="tare_input")
+            else:
+                st.text_input("Tare (LB)", value="", disabled=True, key="_tare_placeholder")
 
-            tare_for_calc = (st.session_state.get("tare_input") or "") if st.session_state.get("_entered_tare_for_line") else ""
-            net, total = calc_line(st.session_state.unit_price_input, st.session_state.gross_input, tare_for_calc)
-            st.markdown(f"**Net** :red[{net:.2f}] LB &nbsp;&nbsp; **Total Amount** :red[${total:.2f}]")
+        tare_for_calc = _tare_display
+        net, total = calc_line(
+            st.session_state.get("unit_price_input", ""),
+            st.session_state.get("gross_input", ""),
+            tare_for_calc,
+        )
+        st.markdown(f"**Net** :red[{net:.2f}] LB &nbsp;&nbsp; **Total Amount** :red[${total:.2f}]")
 
-            b1, b2 = st.columns(2, gap="small")
-            with b1:
-                clear_click = st.form_submit_button("Clear", use_container_width=True)
-            with b2:
-                confirm_click = st.form_submit_button("Confirm (Enter)", use_container_width=True)
+        b1, b2 = st.columns(2, gap="small")
+        with b1:
+            clear_click = st.button("Clear", use_container_width=True)
+        with b2:
+            confirm_click = st.button("Confirm (Enter)", use_container_width=True, type="primary")
 
         if clear_click:
             st.session_state.picked_material_id = None
@@ -1816,19 +1779,9 @@ def ticketing_page():
             st.rerun()
 
         if confirm_click:
-            sg, stare, sup = st.session_state.get("_saved_confirm_snapshot", ("", "", ""))
-            # 若快照全空（可能被 clear_on_submit 或竞态清掉）则用当前 session_state
-            now_g = (st.session_state.get("gross_input") or "").strip()
-            now_t = (st.session_state.get("tare_input") or "").strip()
-            now_u = (st.session_state.get("unit_price_input") or "").strip()
-            if (sg, stare, sup) == ("", "", "") or (not sg and not stare):
-                sg, stare, sup = now_g, now_t, now_u
-            elif not sg and now_g:
-                sg = now_g
-            elif not stare and now_t:
-                stare = now_t
-            if not sup and now_u:
-                sup = now_u
+            sg = (st.session_state.get("gross_input") or "").strip()
+            stare = (st.session_state.get("tare_input") or "").strip()
+            sup = (st.session_state.get("unit_price_input") or "").strip()
             add_line_to_receipt(override_gross=sg, override_tare=stare, override_unit_price=sup)
             st.session_state.picked_material_id = None
             st.session_state.picked_material_name = ""
@@ -1838,6 +1791,92 @@ def ticketing_page():
             st.session_state._keypad_pending = None
             st.rerun()
 
+        # ✅ Keypad — 纯 JS 实现
+        st.markdown("**Keypad**")
+        _keypad_html = """
+<style>
+  .kp-grid { display:grid; grid-template-columns:1fr 1fr 1fr; gap:5px; font-family:Arial,sans-serif; }
+  .kp-btn {
+    padding:10px 0; font-size:17px; font-weight:700; border:1px solid #d1d5db;
+    border-radius:6px; background:#fff; cursor:pointer; text-align:center;
+    user-select:none; -webkit-user-select:none; transition:background 0.1s;
+  }
+  .kp-btn:active { background:#e5e7eb; }
+</style>
+<div class="kp-grid">
+  <div class="kp-btn" data-k="1">1</div><div class="kp-btn" data-k="2">2</div><div class="kp-btn" data-k="3">3</div>
+  <div class="kp-btn" data-k="4">4</div><div class="kp-btn" data-k="5">5</div><div class="kp-btn" data-k="6">6</div>
+  <div class="kp-btn" data-k="7">7</div><div class="kp-btn" data-k="8">8</div><div class="kp-btn" data-k="9">9</div>
+  <div class="kp-btn" data-k="0">0</div><div class="kp-btn" data-k=".">.</div><div class="kp-btn" data-k="del">⌫</div>
+</div>
+<script>
+(function(){
+  var doc = window.parent.document;
+
+  // 跟踪上次聚焦的 Price/Gross/Tare input
+  // 每次 rerun 都重新绑定 focusin（移除旧的防止重复）
+  if (doc.__kpFocusHandler) {
+    doc.removeEventListener('focusin', doc.__kpFocusHandler, true);
+  }
+  doc.__kpFocusHandler = function(e) {
+    if (!e.target || e.target.tagName !== 'INPUT') return;
+    var w = e.target.closest('[data-testid="stTextInput"]');
+    if (!w) return;
+    var lb = w.querySelector('label');
+    var txt = lb ? lb.textContent : '';
+    if (txt.indexOf('Price') >= 0 || txt.indexOf('Gross') >= 0 || txt.indexOf('Tare') >= 0) {
+      doc.__kpLastInput = e.target;
+    }
+  };
+  doc.addEventListener('focusin', doc.__kpFocusHandler, true);
+
+  // React 兼容 setter
+  var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+  function setVal(input, val) {
+    nativeSetter.call(input, val);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  // 查找目标 input
+  function getTarget() {
+    var last = doc.__kpLastInput;
+    if (last && last.isConnected && !last.disabled) return last;
+    // fallback: Gross
+    var blocks = doc.querySelectorAll('[data-testid="stTextInput"]');
+    for (var i = 0; i < blocks.length; i++) {
+      var lb = blocks[i].querySelector('label');
+      if (lb && lb.textContent.indexOf('Gross') >= 0) {
+        var inp = blocks[i].querySelector('input');
+        if (inp && !inp.disabled) { doc.__kpLastInput = inp; return inp; }
+      }
+    }
+    return null;
+  }
+
+  // 绑定 keypad
+  document.querySelectorAll('.kp-btn').forEach(function(btn) {
+    btn.addEventListener('mousedown', function(e) { e.preventDefault(); });
+    btn.addEventListener('click', function() {
+      var key = this.getAttribute('data-k');
+      var input = getTarget();
+      if (!input) return;
+      var val = input.value || '';
+      if (key === 'del') {
+        setVal(input, val.slice(0, -1));
+      } else {
+        if (key === '.' && val.indexOf('.') >= 0) return;
+        setVal(input, val + key);
+      }
+      input.focus();
+    });
+  });
+})();
+</script>
+"""
+        components.html(_keypad_html, height=220)
+
+        # JS 注入放在 keypad 之后，避免 height=0 iframe 在表单与 keypad 之间产生间距导致跳动
         enter_workflow_js()
 
         if st.session_state.focus_request in ("gross", "tare"):
@@ -1845,415 +1884,530 @@ def ticketing_page():
             focus_js(st.session_state.focus_request, st.session_state._focus_counter)
             st.session_state.focus_request = None
 
-        # ✅ Keypad
-        st.write("")
-        st.markdown("**Keypad**")
-
-<<<<<<< Current (Your changes)
-<<<<<<< Current (Your changes)
-        # Target selector: Gross / Tare / Price
-        _cur_target = st.session_state.get("key_target", "gross")
-        _kt1, _kt2, _kt3 = st.columns(3, gap="small")
-
-        with _kt1:
-            if st.button(
-                "Gross",
-                type="primary" if _cur_target == "gross" else "secondary",
-                use_container_width=True,
-                key="_kp_tgt_gross",
-            ):
-                st.session_state.key_target = "gross"
-                st.rerun()
-
-        with _kt2:
-            if st.button(
-                "Tare",
-                type="primary" if _cur_target == "tare" else "secondary",
-                use_container_width=True,
-                key="_kp_tgt_tare",
-            ):
-                st.session_state.key_target = "tare"
-                st.session_state._entered_tare_for_line = True
-                st.session_state.focus_request = "tare"
-                st.rerun()
-
-        with _kt3:
-            if st.button(
-                "Price",
-                type="primary" if _cur_target == "unit_price" else "secondary",
-                use_container_width=True,
-                key="_kp_tgt_price",
-            ):
-                st.session_state.key_target = "unit_price"
-                st.rerun()
-
-=======
->>>>>>> Incoming (Background Agent changes)
-=======
->>>>>>> Incoming (Background Agent changes)
-        def keypad_append(ch: str):
-            tgt = st.session_state.get("key_target", "gross")
-            skey = {"unit_price": "unit_price_input", "tare": "tare_input"}.get(tgt, "gross_input")
-            s = (st.session_state.get(skey) or "") or ""
-            if ch not in "0123456789." or (ch == "." and "." in s):
-                return
-            st.session_state._keypad_pending = ("append", tgt, ch)
-
-        def keypad_backspace():
-            tgt = st.session_state.get("key_target", "gross")
-            st.session_state._keypad_pending = ("backspace", tgt, None)
-
-        rA, rB, rC = st.columns(3, gap="small")
-        if rA.button("1", use_container_width=True): keypad_append("1"); st.rerun()
-        if rB.button("2", use_container_width=True): keypad_append("2"); st.rerun()
-        if rC.button("3", use_container_width=True): keypad_append("3"); st.rerun()
-
-        rA, rB, rC = st.columns(3, gap="small")
-        if rA.button("4", use_container_width=True): keypad_append("4"); st.rerun()
-        if rB.button("5", use_container_width=True): keypad_append("5"); st.rerun()
-        if rC.button("6", use_container_width=True): keypad_append("6"); st.rerun()
-
-        rA, rB, rC = st.columns(3, gap="small")
-        if rA.button("7", use_container_width=True): keypad_append("7"); st.rerun()
-        if rB.button("8", use_container_width=True): keypad_append("8"); st.rerun()
-        if rC.button("9", use_container_width=True): keypad_append("9"); st.rerun()
-
-        rA, rB, rC = st.columns(3, gap="small")
-        if rA.button("0", use_container_width=True): keypad_append("0"); st.rerun()
-        if rB.button(".", use_container_width=True): keypad_append("."); st.rerun()
-        if rC.button("delete", use_container_width=True): keypad_backspace(); st.rerun()
-
         st.markdown("</div>", unsafe_allow_html=True)
 
 # -----------------------------
 # Manage Pages
 # -----------------------------
-def manage_receipt_detail_inquiry():
-    st.subheader("Receipt Detail Inquiry")
-    import math
-
-    receipts_df = qdf("""
-        SELECT id, issue_time, issued_by, ticketing_method, withdraw_code,
-               client_name, subtotal, rounding_amount,
-               CASE WHEN voided=1 THEN 'Voided' ELSE 'Not Voided' END AS void_status,
-               CASE WHEN withdrawn=1 THEN 'Withdrawn' ELSE 'Undrawn' END AS withdraw_status
-        FROM receipts
-        ORDER BY id DESC
-        LIMIT 500
-    """)
-    if receipts_df.empty:
-        st.info("No receipts yet.")
+def _rdi_ticket_detail_view(rid):
+    """Open Ticket 详情页，参考截图：表头、客户信息、材料明细（可编辑）、汇总、Printout。"""
+    receipt = qone("SELECT * FROM receipts WHERE id = ?", (rid,))
+    if not receipt:
+        st.error("Ticket not found.")
+        if st.button("Back", key="rdi_detail_back_err"):
+            st.session_state.pop("_rdi_open_ticket", None)
+            st.rerun()
         return
 
-    # --- receipt selector ---
-    receipt_options = []
-    for _, row in receipts_df.iterrows():
-        label = f"RC {row['withdraw_code']}  |  {row['issue_time']}  |  {row.get('client_name', '')}  |  ${row['subtotal']:.2f}"
-        receipt_options.append((label, int(row["id"])))
+    lines_df = qdf("SELECT * FROM receipt_lines WHERE receipt_id = ? ORDER BY id", (rid,))
+    status_text = "VOIDED" if receipt["voided"] else "OPEN"
+    issue_time_raw = receipt["issue_time"] or ""
+    try:
+        dt = datetime.strptime(issue_time_raw, "%Y-%m-%d %H:%M:%S")
+        created_date = dt.strftime("%m/%d/%Y")
+        created_time = dt.strftime("%I:%M %p")
+    except Exception:
+        created_date = issue_time_raw[:10] if len(issue_time_raw) >= 10 else issue_time_raw
+        created_time = issue_time_raw[11:] if len(issue_time_raw) > 11 else ""
 
-    sel_label = st.selectbox(
-        "Select Receipt",
-        options=[o[0] for o in receipt_options],
-        index=0,
-        key="_detail_receipt_sel",
-    )
-    sel_rid = dict(receipt_options).get(sel_label)
-    if sel_rid is None:
-        return
+    client_name = (receipt["client_name"] or "").strip() or "-"
+    issued_by = (receipt["issued_by"] or "").strip() or "-"
+    method = (receipt["ticketing_method"] or "").strip() or "-"
 
-    # --- receipt header info ---
-    rrow = receipts_df[receipts_df["id"] == sel_rid].iloc[0]
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Withdraw Code", rrow["withdraw_code"])
-    c2.metric("Issue Time", rrow["issue_time"])
-    c3.metric("Status", rrow["void_status"])
-    c4.metric("Withdraw", rrow["withdraw_status"])
-
-    # --- receipt lines with Actual Amount / Rounding / Amount / Adjustment ---
-    lines_df = qdf("SELECT * FROM receipt_lines WHERE receipt_id = ? ORDER BY id", (int(sel_rid),))
-    if lines_df.empty:
-        st.info("No line items for this receipt.")
-        return
-
-    display_rows = []
-    for _, ln in lines_df.iterrows():
-        actual_amount = float(ln["total"])
-        amount = round(actual_amount)
-        rounding = round(amount - actual_amount, 3)
-        adjustment = 0.0
-        display_rows.append({
-            "Material": ln["material_name"],
-            "Gross(M)": f"{float(ln['gross']):.0f}",
-            "Tare": f"{float(ln['tare']):.0f}",
-            "Net": f"{float(ln['net']):.0f}",
-            "Actual Amount": f"${actual_amount:.3f}",
-            "Rounding": f"${rounding:+.3f}",
-            "Amount": f"${amount:.3f}",
-            "Adjustment": f"${adjustment:.3f}",
-        })
-
-    detail_df = pd.DataFrame(display_rows)
-    st.dataframe(detail_df, use_container_width=True, hide_index=True, height=min(56 + len(display_rows) * 35, 600))
-
-    # --- totals row ---
-    total_actual = sum(float(ln["total"]) for _, ln in lines_df.iterrows())
-    total_amount = sum(round(float(ln["total"])) for _, ln in lines_df.iterrows())
-    total_rounding = round(total_amount - total_actual, 3)
+    # ── Header ──
     st.markdown(
-        f"**Totals** &nbsp;&nbsp; Actual Amount: **${total_actual:.3f}** &nbsp;&nbsp; "
-        f"Rounding: **${total_rounding:+.3f}** &nbsp;&nbsp; Amount: **${total_amount:.3f}** &nbsp;&nbsp; "
-        f"Adjustment: **$0.000**"
+        f"""<div style="background:#2c3e50;color:white;padding:10px 16px;border-radius:6px 6px 0 0;font-size:14px;">
+        <b>Ticket Details</b>
+        <span style="float:right;font-size:12px;">Home / Ticket Details</span>
+        </div>""",
+        unsafe_allow_html=True,
     )
+
+    # Ticket Id / Status + Back / Confirm Change
+    hd1, hd2 = st.columns([6, 4])
+    with hd1:
+        st.markdown(f"**Ticket Id : {rid} / {status_text}**")
+    with hd2:
+        bc1, bc2 = st.columns(2)
+        with bc1:
+            if st.button("⬅ Back", key="rdi_detail_back", use_container_width=True):
+                st.session_state.pop("_rdi_open_ticket", None)
+                st.rerun()
+        with bc2:
+            confirm_change = st.button("✏ Confirm Change", key="rdi_detail_confirm", use_container_width=True, type="primary")
+
+    # ── Client Info Table ──
+    ic1, ic2, ic3, ic4 = st.columns(4)
+    with ic1:
+        st.caption("Seller")
+        st.text(client_name)
+    with ic2:
+        st.caption("Created on")
+        st.text(created_date)
+    with ic3:
+        st.caption("Time")
+        st.text(created_time)
+    with ic4:
+        st.caption("By")
+        st.text(f"{issued_by} - {method}")
+
+    st.markdown("---")
+
+    # ── Material Lines Table (editable) ──
+    st.markdown("##### Material Lines")
+    # 表头
+    mh = st.columns([2, 1, 1, 1, 1, 1, 1.2])
+    mh[0].markdown("**Material Name**")
+    mh[1].markdown("**Gross(M)**")
+    mh[2].markdown("**Tare**")
+    mh[3].markdown("**Net**")
+    mh[4].markdown("**Price**")
+    mh[5].markdown("**Amount**")
+    mh[6].markdown("**Created Date**")
+
+    edited_lines = []
+    total_gross = 0.0
+    total_tare = 0.0
+    total_net = 0.0
+    total_amount = 0.0
+    for idx, ln in lines_df.iterrows():
+        line_id = int(ln["id"])
+        mc = st.columns([2, 1, 1, 1, 1, 1, 1.2])
+        mc[0].text(ln["material_name"] or "")
+        new_gross = mc[1].number_input("Gross", value=float(ln["gross"] or 0), min_value=0.0, step=0.01, key=f"rdi_g_{line_id}", label_visibility="collapsed")
+        new_tare = mc[2].number_input("Tare", value=float(ln["tare"] or 0), min_value=0.0, step=0.01, key=f"rdi_t_{line_id}", label_visibility="collapsed")
+        new_net = round(new_gross - new_tare, 4)
+        price = float(ln["unit_price"] or 0)
+        new_total = round(new_net * price, 2)
+        mc[3].text(f"{new_net:.2f}")
+        mc[4].text(f"${price:.3f}")
+        mc[5].text(f"${new_total:.2f}")
+        mc[6].text(created_date)
+        edited_lines.append((line_id, new_gross, new_tare, new_net, new_total))
+        total_gross += new_gross
+        total_tare += new_tare
+        total_net += new_net
+        total_amount += new_total
+
+    st.markdown("---")
+
+    # ── Total LBS ──
+    st.markdown("##### Total LBS")
+    ts = st.columns([2, 1, 1, 1, 1, 1, 1.2])
+    ts[0].markdown(f"**{len(lines_df)} Material(s)**")
+    ts[1].text(f"{total_gross:.2f}")
+    ts[2].text(f"{total_tare:.2f}")
+    ts[3].text(f"{total_net:.2f}")
+    ts[4].text("")
+    subtotal = float(receipt["subtotal"] or 0)
+    rounding = float(receipt["rounding_amount"] or 0)
+    ts[5].text(f"${total_amount:.2f}")
+    ts[6].text("")
+
+    # ── Summary row ──
+    st.markdown("---")
+    sm = st.columns([1.2, 1, 1, 1, 1.2])
+    sm[0].metric("Actual Amount", f"${total_amount:.3f}")
+    sm[1].metric("Rounding", f"${rounding:.3f}")
+    sm[2].metric("Amount", f"${total_amount + rounding:.3f}")
+    sm[3].metric("Adjustment", "$0.000")
+    sm[4].metric("Balance Amount", f"${total_amount + rounding:.3f}")
+
+    st.markdown("---")
+
+    # ── Footer: Printout ──
+    ft1, ft2, ft3 = st.columns([5, 2, 2])
+    with ft1:
+        st.text(f"Paid Amount $0.000")
+    with ft3:
+        printout_click = st.button("🖨 Printout", key="rdi_detail_print", use_container_width=True, type="primary")
+
+    # ── Confirm Change: save edited lines ──
+    if confirm_change:
+        conn = db()
+        cur = conn.cursor()
+        new_subtotal = 0.0
+        for (line_id, g, t, n, tot) in edited_lines:
+            cur.execute("UPDATE receipt_lines SET gross=?, tare=?, net=?, total=? WHERE id=?", (g, t, n, tot, line_id))
+            new_subtotal += tot
+        new_rounding = rounding
+        cur.execute("UPDATE receipts SET subtotal=?, rounding_amount=? WHERE id=?", (new_subtotal, new_rounding, rid))
+        conn.commit()
+        conn.close()
+        st.success("修改已保存！")
+        st.rerun()
+
+    # ── Printout ──
+    if printout_click:
+        receipt_data = generate_print_receipt(rid)
+        if receipt_data and receipt_data.get("html"):
+            st.session_state._pending_print_html = receipt_data["html"]
+            st.rerun()
+
+
+def _rdi_build_report_html(from_str, to_str, rows):
+    """生成 Daily Ticket Report 的可打印 HTML。"""
+    total_balance = sum(float(r["rounding_amount"] or 0) for r in rows)
+    total_adj = 0.0
+    total_paid = 0.0
+    total_total = total_balance
+
+    lines_html = ""
+    for r in rows:
+        rid = r["id"]
+        status = "VOIDED" if r["voided"] else "OPEN"
+        issue = (r["issue_time"] or "")[:10]
+        user = r["issued_by"] or ""
+        customer = r["client_name"] or ""
+        bal = float(r["rounding_amount"] or 0)
+        lines_html += f"""
+        <tr>
+          <td rowspan="2" style="vertical-align:top;">{rid}</td>
+          <td rowspan="2" style="vertical-align:top;">{status}</td>
+          <td rowspan="2" style="vertical-align:top;">{issue} -<br>01/01/0001</td>
+          <td rowspan="2" style="vertical-align:top;">{user}</td>
+          <td rowspan="2" style="vertical-align:top;">{customer}</td>
+          <td></td><td></td><td></td><td></td>
+        </tr>
+        <tr>
+          <td style="text-align:right;">{bal:,.2f}</td>
+          <td style="text-align:right;">0.00</td>
+          <td style="text-align:right;">0.00</td>
+          <td style="text-align:right;">{bal:,.2f}</td>
+        </tr>"""
+
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<title>Daily Ticket Report</title>
+<style>
+@media print {{ @page {{ margin: 12mm; }} body {{ margin: 0; }} .no-print {{ display:none!important; }} }}
+body {{ font-family: 'Segoe UI', Arial, sans-serif; font-size: 11px; color: #333; padding: 20px; }}
+h2 {{ text-align:center; margin: 4px 0; font-size: 16px; }}
+.meta {{ display:flex; justify-content:space-between; border-bottom:2px solid #333; padding:4px 0; margin-bottom:8px; font-size:11px; }}
+table {{ width:100%; border-collapse:collapse; font-size:11px; }}
+th, td {{ padding: 3px 6px; text-align:left; }}
+th {{ border-bottom: 1px solid #999; font-weight:600; }}
+tr.total-row td {{ border-top:3px double #333; font-weight:700; }}
+.page-info {{ text-align:right; font-size:10px; margin-bottom:2px; }}
+.btn-bar {{ text-align:center; margin:16px 0; }}
+.btn-bar button {{ padding:8px 28px; font-size:13px; margin:0 8px; cursor:pointer; border:1px solid #999; border-radius:4px; }}
+.btn-bar button.primary {{ background:#2c7be5; color:#fff; border-color:#2c7be5; }}
+</style></head><body>
+<div class="page-info">1 of 1</div>
+<h2>Daily Ticket Report</h2>
+<div class="meta"><span><b>All</b></span><span>{from_str}</span><span>{to_str}</span></div>
+<table>
+<thead>
+<tr>
+  <th>Ticket</th><th>Status</th><th>Start - Finish</th><th>User</th><th>Customer</th>
+  <th style="text-align:right;">Balance<br>Amount</th>
+  <th style="text-align:right;">Adjustment<br>Amount</th>
+  <th style="text-align:right;">Paid Amount</th>
+  <th style="text-align:right;">Total<br>Amount</th>
+</tr>
+</thead>
+<tbody>
+{lines_html}
+<tr class="total-row">
+  <td colspan="5" style="text-align:right;"><b>Total :-</b></td>
+  <td style="text-align:right;">{total_balance:,.2f}</td>
+  <td style="text-align:right;">{total_adj:,.2f}</td>
+  <td style="text-align:right;">{total_paid:,.2f}</td>
+  <td style="text-align:right;">{total_total:,.2f}</td>
+</tr>
+</tbody></table>
+<div class="btn-bar no-print">
+  <button onclick="window.print()" class="primary">Print</button>
+  <button onclick="window.close()">Close</button>
+</div>
+</body></html>"""
+
+
+def manage_receipt_detail_inquiry():
+    st.subheader("票据明细信息查询")
+
+    # 如果已打开某票据详情，直接渲染详情页
+    if st.session_state.get("_rdi_open_ticket"):
+        _rdi_ticket_detail_view(st.session_state._rdi_open_ticket)
+        return
+
+    # 图标按钮固定 40x40，不随页面缩放
+    st.markdown("""<style>
+    .rdi-icons .stButton > button {
+        width: 40px !important; min-width: 40px !important; max-width: 40px !important;
+        height: 40px !important; min-height: 40px !important; max-height: 40px !important;
+        padding: 0 !important; overflow: hidden !important;
+    }
+    .rdi-icons [data-testid="column"] {
+        flex: 0 0 48px !important; min-width: 48px !important; max-width: 48px !important;
+    }
+    .rdi-icons [data-testid="stHorizontalBlock"] {
+        gap: 4px !important; flex-wrap: nowrap !important;
+    }
+    </style>""", unsafe_allow_html=True)
+
+    # 日期筛选
+    col_from, col_to, col_btns, _ = st.columns([1.2, 1.2, 1.5, 2.5])
+    today = datetime.now().date()
+    with col_from:
+        from_date = st.date_input("From Date", value=today, key="rdi_from")
+    with col_to:
+        to_date = st.date_input("To Date", value=today, key="rdi_to")
+    with col_btns:
+        st.markdown("<label style='visibility:hidden;font-size:14px;'>.</label>", unsafe_allow_html=True)
+        st.markdown('<div class="rdi-icons">', unsafe_allow_html=True)
+        b1, b2, b3 = st.columns(3)
+        with b1:
+            search_click = st.button("🔍", key="rdi_search", type="primary")
+        with b2:
+            refresh_click = st.button("🔄", key="rdi_refresh")
+        with b3:
+            report_click = st.button("📋", key="rdi_report")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    from_str = from_date.strftime("%Y-%m-%d")
+    to_str = to_date.strftime("%Y-%m-%d")
+
+    df = qdf("""
+        SELECT
+            r.id                                           AS "Ticket Id",
+            substr(r.issue_time, 1, 10)                    AS "Date Created",
+            substr(r.issue_time, 12)                       AS "Time",
+            CASE WHEN r.voided=1 THEN 'VOIDED' ELSE 'OPEN' END AS "Status",
+            r.issued_by                                    AS "User",
+            r.client_name                                  AS "Seller",
+            r.rounding_amount                              AS "Total Amount"
+        FROM receipts r
+        WHERE substr(r.issue_time, 1, 10) >= ? AND substr(r.issue_time, 1, 10) <= ?
+            AND r.voided = 0
+        ORDER BY r.id DESC
+        LIMIT 500
+    """, (from_str, to_str))
+
+    # ── Ticket Report 弹窗 ──
+    if report_click:
+        rows = qdf("""
+            SELECT r.* FROM receipts r
+            WHERE substr(r.issue_time,1,10) >= ? AND substr(r.issue_time,1,10) <= ? AND r.voided=0
+            ORDER BY r.id
+        """, (from_str, to_str)).to_dict("records")
+        report_html = _rdi_build_report_html(from_str, to_str, rows)
+        st.session_state._rdi_report_html = report_html
+
+    if st.session_state.get("_rdi_report_html"):
+        report_html = st.session_state._rdi_report_html
+        del st.session_state["_rdi_report_html"]
+        b64 = base64.b64encode(report_html.encode("utf-8")).decode("ascii")
+        js = f"""<script>
+(function() {{
+  try {{
+    var w = window.open('', '_blank');
+    if (w) {{
+      w.document.write(atob("{b64}"));
+      w.document.close();
+    }} else {{
+      var a = document.createElement('a');
+      a.href = 'data:text/html;base64,{b64}';
+      a.target = '_blank';
+      a.click();
+    }}
+  }} catch(e) {{ console.error(e); }}
+}})();
+</script>"""
+        components.html(js, height=0)
+
+    if df.empty:
+        st.info("所选日期范围内没有票据。")
+        return
+
+    total_rows = len(df)
+    page_size = 10
+    total_pages = max(1, (total_rows + page_size - 1) // page_size)
+
+    # 分页状态
+    if "_rdi_page" not in st.session_state:
+        st.session_state._rdi_page = 1
+    cur_page = st.session_state._rdi_page
+    if cur_page > total_pages:
+        cur_page = total_pages
+        st.session_state._rdi_page = cur_page
+
+    start_idx = (cur_page - 1) * page_size
+    end_idx = min(start_idx + page_size, total_rows)
+    page_df = df.iloc[start_idx:end_idx]
+
+    # 紧凑样式 CSS
+    st.markdown("""<style>
+    .rdi-tbl p, .rdi-tbl span { font-size: 12px !important; line-height: 1.4 !important; margin: 0 !important; }
+    .rdi-tbl .stButton > button { font-size: 11px !important; padding: 2px 10px !important; min-height: 26px !important; }
+    .rdi-hdr p { font-weight: 700 !important; font-size: 11px !important; color: #555 !important; text-transform: uppercase; }
+    </style>""", unsafe_allow_html=True)
+
+    st.markdown('<div class="rdi-tbl">', unsafe_allow_html=True)
+
+    # 表头
+    st.markdown('<div class="rdi-hdr">', unsafe_allow_html=True)
+    h1, h2, h3, h4, h5, h6, h7, h8, h9 = st.columns([0.6, 0.9, 0.7, 0.55, 0.9, 0.9, 0.9, 0.4, 0.55])
+    with h1: st.markdown("**Ticket Id**")
+    with h2: st.markdown("**Date Created**")
+    with h3: st.markdown("**Time**")
+    with h4: st.markdown("**Status**")
+    with h5: st.markdown("**User**")
+    with h6: st.markdown("**Seller**")
+    with h7: st.markdown("**Ticket Amount**")
+    with h8: st.markdown("**Void**")
+    with h9: st.markdown("**Open**")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    for _, row in page_df.iterrows():
+        rid = int(row["Ticket Id"])
+        status = row["Status"]
+        status_html = (
+            '<span style="background:#28a745;color:#fff;padding:1px 6px;border-radius:8px;font-size:11px;">OPEN</span>'
+            if status == "OPEN" else
+            '<span style="background:#dc3545;color:#fff;padding:1px 6px;border-radius:8px;font-size:11px;">VOIDED</span>'
+        )
+        amt = float(row["Total Amount"])
+        time_str = row["Time"] or ""
+        c1, c2, c3, c4, c5, c6, c7, c8, c9 = st.columns([0.6, 0.9, 0.7, 0.55, 0.9, 0.9, 0.9, 0.4, 0.55])
+        with c1: st.markdown(f"<span>{rid}</span>", unsafe_allow_html=True)
+        with c2: st.markdown(f"<span>{row['Date Created']}</span>", unsafe_allow_html=True)
+        with c3: st.markdown(f"<span>{time_str}</span>", unsafe_allow_html=True)
+        with c4: st.markdown(status_html, unsafe_allow_html=True)
+        with c5: st.markdown(f"<span>{row['User'] or ''}</span>", unsafe_allow_html=True)
+        with c6: st.markdown(f"<span>{row['Seller'] or ''}</span>", unsafe_allow_html=True)
+        with c7: st.markdown(f"<span>${amt:,.3f}</span>", unsafe_allow_html=True)
+        with c8:
+            if st.button("🗑", key=f"rdi_void_{rid}", use_container_width=True, help="Void this ticket"):
+                exec_sql("UPDATE receipts SET voided = 1 WHERE id = ?", (rid,))
+                st.rerun()
+        with c9:
+            if st.button("Open", key=f"rdi_open_{rid}", use_container_width=True, help="Open ticket details"):
+                st.session_state._rdi_open_ticket = rid
+                st.rerun()
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # 分页导航
+    st.markdown("<div style='margin-top:6px;'></div>", unsafe_allow_html=True)
+
+    # 页码范围（最多5个）
+    half = 2
+    p_start = max(1, cur_page - half)
+    p_end = min(total_pages, cur_page + half)
+    if p_end - p_start < 4:
+        if p_start == 1:
+            p_end = min(total_pages, p_start + 4)
+        else:
+            p_start = max(1, p_end - 4)
+    page_nums = list(range(p_start, p_end + 1))
+
+    nav_cols = st.columns([2] + [0.35] * (4 + len(page_nums)) + [2])
+    # col 0: info text
+    with nav_cols[0]:
+        st.markdown(f"<span style='font-size:12px;color:#888;line-height:32px;'>Showing {start_idx+1} to {end_idx} of {total_rows}</span>", unsafe_allow_html=True)
+    # col 1: «
+    with nav_cols[1]:
+        if st.button("«", key="rdi_pg_first", use_container_width=True, disabled=(cur_page <= 1)):
+            st.session_state._rdi_page = 1; st.rerun()
+    # col 2: ‹
+    with nav_cols[2]:
+        if st.button("‹", key="rdi_pg_prev", use_container_width=True, disabled=(cur_page <= 1)):
+            st.session_state._rdi_page = cur_page - 1; st.rerun()
+    # page number buttons
+    for i, pn in enumerate(page_nums):
+        with nav_cols[3 + i]:
+            btn_type = "primary" if pn == cur_page else "secondary"
+            if st.button(str(pn), key=f"rdi_pg_{pn}", use_container_width=True, type=btn_type):
+                st.session_state._rdi_page = pn; st.rerun()
+    # ›
+    with nav_cols[3 + len(page_nums)]:
+        if st.button("›", key="rdi_pg_next", use_container_width=True, disabled=(cur_page >= total_pages)):
+            st.session_state._rdi_page = cur_page + 1; st.rerun()
+    # »
+    with nav_cols[4 + len(page_nums)]:
+        if st.button("»", key="rdi_pg_last", use_container_width=True, disabled=(cur_page >= total_pages)):
+            st.session_state._rdi_page = total_pages; st.rerun()
 
 def manage_void_receipts():
     st.subheader("Void / Withdraw Processing")
     df = qdf("""
-        SELECT r.id, r.issue_time, r.issued_by, r.withdraw_code, r.client_name,
+        SELECT id, issue_time, issued_by,
                (SELECT COUNT(*) FROM receipt_lines rl WHERE rl.receipt_id=r.id) AS material_count,
-               r.subtotal, r.rounding_amount,
-               CASE WHEN r.withdrawn=1 THEN 'Withdrawn' ELSE 'Undrawn' END AS withdraw_status,
-               CASE WHEN r.voided=1 THEN 'Voided' ELSE 'Not Voided' END AS void_status,
-               r.voided, r.withdrawn
+               subtotal, rounding_amount, ticketing_method,
+               CASE WHEN withdrawn=1 THEN 'Withdrawn' ELSE 'Undrawn' END AS withdraw_status,
+               CASE WHEN voided=1 THEN 'Voided' ELSE 'Not Voided' END AS void_status
         FROM receipts r
-        ORDER BY r.id DESC
+        ORDER BY id DESC
         LIMIT 500
     """)
     if df.empty:
         st.info("No receipts yet.")
         return
-
-    opts = []
-    for _, row in df.iterrows():
-        label = f"#{row['id']}  RC {row['withdraw_code']}  |  {row['issue_time']}  |  {row.get('client_name','')}  |  ${row['subtotal']:.2f}  |  {row['void_status']}"
-        opts.append((label, int(row["id"])))
-    sel_label = st.selectbox("Select Receipt", [o[0] for o in opts], index=0, key="_void_sel")
-    sel_id = dict(opts).get(sel_label)
-    if sel_id is None:
-        return
-    rrow = df[df["id"] == sel_id].iloc[0]
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Withdraw Code", rrow["withdraw_code"])
-    c2.metric("Subtotal", f"${rrow['subtotal']:.2f}")
-    c3.metric("Void Status", rrow["void_status"])
-    c4.metric("Withdraw", rrow["withdraw_status"])
-
-    lines = qdf("SELECT material_name, unit_price, gross, tare, net, total FROM receipt_lines WHERE receipt_id=? ORDER BY id", (int(sel_id),))
-    if not lines.empty:
-        st.dataframe(lines, use_container_width=True, hide_index=True)
-
-    bc1, bc2, _ = st.columns([1, 1, 4])
-    with bc1:
-        if int(rrow.get("voided", 0)) == 0:
-            if st.button("作废此票据", type="primary", key="_void_btn"):
-                exec_sql("UPDATE receipts SET voided=1 WHERE id=?", (int(sel_id),))
-                st.success("已作废。")
-                st.rerun()
-        else:
-            st.info("此票据已作废")
-    with bc2:
-        if int(rrow.get("withdrawn", 0)) == 0:
-            if st.button("标记已提货", key="_withdraw_btn"):
-                exec_sql("UPDATE receipts SET withdrawn=1 WHERE id=?", (int(sel_id),))
-                st.success("已标记提货。")
-                st.rerun()
-        else:
-            st.info("已提货")
-
+    st.dataframe(df, use_container_width=True, height=520)
 
 def manage_daily_summary():
     st.subheader("Daily Transaction Summary")
-    fc1, fc2, _ = st.columns([1, 1, 4])
-    with fc1:
-        d_from = st.date_input("From", value=datetime.now().replace(day=1), key="_ds_from")
-    with fc2:
-        d_to = st.date_input("To", value=datetime.now(), key="_ds_to")
     df = qdf("""
-        SELECT substr(r.issue_time,1,10) AS Date,
-               COUNT(r.id) AS Receipts,
-               COALESCE(SUM((SELECT COALESCE(SUM(rl.net),0) FROM receipt_lines rl WHERE rl.receipt_id=r.id)),0) AS Net_Total,
-               COALESCE(SUM(r.subtotal),0) AS Subtotal,
-               COALESCE(SUM(r.rounding_amount),0) AS Rounding
+        SELECT substr(issue_time,1,10) AS issue_date,
+               SUM((SELECT COALESCE(SUM(net),0) FROM receipt_lines rl WHERE rl.receipt_id=r.id)) AS invoiced_quantity,
+               SUM(subtotal) AS subtotal,
+               SUM(rounding_amount) AS rounding_amount
         FROM receipts r
-        WHERE r.voided=0 AND substr(r.issue_time,1,10) >= ? AND substr(r.issue_time,1,10) <= ?
-        GROUP BY Date
-        ORDER BY Date DESC
-    """, (str(d_from), str(d_to)))
-    if df.empty:
-        st.info("No data for this period.")
-        return
-    st.dataframe(df, use_container_width=True, height=min(520, 38 + 35 * len(df)))
-
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as w:
-        df.to_excel(w, index=False, sheet_name="Daily")
-    st.download_button("Export Excel", data=buf.getvalue(),
-                       file_name=f"daily_summary_{d_from}_{d_to}.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
+        WHERE voided=0
+        GROUP BY issue_date
+        ORDER BY issue_date DESC
+        LIMIT 1000
+    """)
+    st.dataframe(df, use_container_width=True, height=520)
 
 def manage_monthly_summary():
-    st.subheader("Monthly Transaction Summary")
+    st.subheader("Monthly transaction summary")
     df = qdf("""
-        SELECT substr(r.issue_time,1,7) AS Month,
-               COUNT(r.id) AS Receipts,
-               COALESCE(SUM((SELECT COALESCE(SUM(rl.net),0) FROM receipt_lines rl WHERE rl.receipt_id=r.id)),0) AS Net_Total,
-               COALESCE(SUM(r.subtotal),0) AS Subtotal,
-               COALESCE(SUM(r.rounding_amount),0) AS Rounding
+        SELECT substr(issue_time,1,7) AS issue_month,
+               SUM((SELECT COALESCE(SUM(net),0) FROM receipt_lines rl WHERE rl.receipt_id=r.id)) AS invoiced_quantity,
+               SUM(subtotal) AS subtotal,
+               SUM(rounding_amount) AS rounding_amount
         FROM receipts r
-        WHERE r.voided=0
-        GROUP BY Month
-        ORDER BY Month DESC
+        WHERE voided=0
+        GROUP BY issue_month
+        ORDER BY issue_month DESC
+        LIMIT 1000
     """)
-    if df.empty:
-        st.info("No data.")
-        return
-    st.dataframe(df, use_container_width=True, height=min(520, 38 + 35 * len(df)))
-
+    st.dataframe(df, use_container_width=True, height=520)
 
 def manage_annual_summary():
-    st.subheader("Annual Transaction Summary")
+    st.subheader("Annual transaction summary")
     df = qdf("""
-        SELECT substr(r.issue_time,1,4) AS Year,
-               COUNT(r.id) AS Receipts,
-               COALESCE(SUM((SELECT COALESCE(SUM(rl.net),0) FROM receipt_lines rl WHERE rl.receipt_id=r.id)),0) AS Net_Total,
-               COALESCE(SUM(r.subtotal),0) AS Subtotal,
-               COALESCE(SUM(r.rounding_amount),0) AS Rounding
+        SELECT substr(issue_time,1,4) AS issue_year,
+               SUM((SELECT COALESCE(SUM(net),0) FROM receipt_lines rl WHERE rl.receipt_id=r.id)) AS invoiced_quantity,
+               SUM(subtotal) AS subtotal,
+               SUM(rounding_amount) AS rounding_amount
         FROM receipts r
-        WHERE r.voided=0
-        GROUP BY Year
-        ORDER BY Year DESC
+        WHERE voided=0
+        GROUP BY issue_year
+        ORDER BY issue_year DESC
+        LIMIT 100
     """)
-    if df.empty:
-        st.info("No data.")
-        return
-    st.dataframe(df, use_container_width=True, height=min(520, 38 + 35 * len(df)))
-
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as w:
-        df.to_excel(w, index=False, sheet_name="Annual")
-    st.download_button("Export Excel", data=buf.getvalue(),
-                       file_name=f"annual_summary.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
+    st.dataframe(df, use_container_width=True, height=520)
 
 def manage_clients():
     st.subheader("Client Information Management")
-
-    with st.expander("Add New Client", expanded=False):
-        with st.form("_add_client_form", clear_on_submit=True):
-            ac1, ac2 = st.columns(2)
-            new_code = ac1.text_input("Code *")
-            new_name = ac2.text_input("Name *")
-            ac3, ac4, ac5 = st.columns(3)
-            new_phone = ac3.text_input("Phone")
-            new_email = ac4.text_input("Email")
-            new_id = ac5.text_input("ID Number")
-            if st.form_submit_button("Add Client", type="primary"):
-                if not new_code.strip() or not new_name.strip():
-                    st.warning("Code and Name are required.")
-                else:
-                    try:
-                        exec_sql(
-                            "INSERT INTO clients(code, name, phone, email, id_number, deleted, created_at) VALUES(?,?,?,?,?,0,?)",
-                            (new_code.strip(), new_name.strip(), new_phone.strip(), new_email.strip(), new_id.strip(), datetime.now().isoformat()),
-                        )
-                        st.success(f"Client {new_code} added.")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Failed: {e}")
-
-    df = qdf("SELECT id, code, name, phone, email, id_number, deleted FROM clients ORDER BY id DESC LIMIT 2000")
-    if df.empty:
-        st.info("No clients.")
-        return
-
-    st.dataframe(
-        df[df["deleted"] == 0][["code", "name", "phone", "email", "id_number"]],
-        use_container_width=True, hide_index=True, height=min(420, 38 + 35 * len(df)),
-    )
-
-    del_code = st.text_input("Enter Client Code to delete (soft)", key="_del_client_code")
-    if st.button("Delete Client", key="_del_client_btn"):
-        if del_code.strip():
-            exec_sql("UPDATE clients SET deleted=1 WHERE code=?", (del_code.strip(),))
-            st.success(f"Client {del_code} soft-deleted.")
-            st.rerun()
-
+    df = qdf("""
+        SELECT code AS 编号, name AS 姓名, id_number AS 身份证号码, phone AS 手机号码, email AS 邮箱地址, deleted AS 删除标志
+        FROM clients
+        ORDER BY id DESC
+        LIMIT 2000
+    """)
+    st.dataframe(df, use_container_width=True, height=520)
 
 def manage_operators():
     st.subheader("Operator Information Management")
-
-    with st.expander("Add New Operator", expanded=False):
-        with st.form("_add_op_form", clear_on_submit=True):
-            oc1, oc2 = st.columns(2)
-            new_email = oc1.text_input("Email *")
-            new_name = oc2.text_input("Name *")
-            if st.form_submit_button("Add Operator", type="primary"):
-                if not new_email.strip() or not new_name.strip():
-                    st.warning("Email and Name are required.")
-                else:
-                    try:
-                        exec_sql(
-                            "INSERT INTO operators(email, name, deleted, created_at) VALUES(?,?,0,?)",
-                            (new_email.strip(), new_name.strip(), datetime.now().isoformat()),
-                        )
-                        st.success(f"Operator {new_email} added.")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Failed: {e}")
-
-    df = qdf("SELECT id, email, name, deleted, created_at FROM operators ORDER BY id DESC")
-    if df.empty:
-        st.info("No operators.")
-        return
-
-    st.dataframe(
-        df[df["deleted"] == 0][["email", "name", "created_at"]],
-        use_container_width=True, hide_index=True, height=min(420, 38 + 35 * len(df)),
-    )
-
-    del_email = st.text_input("Enter Operator Email to delete (soft)", key="_del_op_email")
-    if st.button("Delete Operator", key="_del_op_btn"):
-        if del_email.strip():
-            exec_sql("UPDATE operators SET deleted=1 WHERE email=?", (del_email.strip(),))
-            st.success(f"Operator {del_email} soft-deleted.")
-            st.rerun()
-
+    df = qdf("SELECT email AS 邮箱地址, name AS 姓名, deleted AS 删除标志, created_at FROM operators ORDER BY id DESC")
+    st.dataframe(df, use_container_width=True, height=520)
 
 def manage_materials():
     st.subheader("Material Information Management")
-
-    cats_df = qdf("SELECT id, name FROM material_categories ORDER BY sort_order, name")
-    cat_names = cats_df["name"].tolist() if not cats_df.empty else []
-
-    with st.expander("Add New Material", expanded=False):
-        with st.form("_add_mat_form", clear_on_submit=True):
-            mc1, mc2, mc3 = st.columns(3)
-            mat_cat = mc1.selectbox("Category *", cat_names, key="_new_mat_cat")
-            mat_code = mc2.text_input("Item Code *")
-            mat_name = mc3.text_input("Name *")
-            mc4, mc5, mc6, mc7 = st.columns(4)
-            mat_unit = mc4.text_input("Unit", value="LB")
-            mat_price = mc5.number_input("Unit Price", min_value=0.0, step=0.001, format="%.3f")
-            mat_min = mc6.number_input("Min Price", min_value=0.0, step=0.001, format="%.3f")
-            mat_max = mc7.number_input("Max Price", min_value=0.0, step=0.001, format="%.3f")
-            if st.form_submit_button("Add Material", type="primary"):
-                if not mat_code.strip() or not mat_name.strip() or not mat_cat:
-                    st.warning("Category, Item Code and Name are required.")
-                else:
-                    cat_row = cats_df[cats_df["name"] == mat_cat]
-                    cat_id = int(cat_row.iloc[0]["id"]) if not cat_row.empty else 1
-                    try:
-                        exec_sql(
-                            "INSERT INTO materials(category_id, item_code, name, unit, unit_price, min_unit_price, max_unit_price, deleted, created_at) VALUES(?,?,?,?,?,?,?,0,?)",
-                            (cat_id, mat_code.strip(), mat_name.strip(), mat_unit.strip(), float(mat_price), float(mat_min), float(mat_max), datetime.now().isoformat()),
-                        )
-                        st.success(f"Material {mat_name} added.")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Failed: {e}")
-
     df = qdf("""
         SELECT m.id, c.name AS category, m.item_code, m.name, m.unit,
                m.unit_price, m.min_unit_price, m.max_unit_price, m.deleted
@@ -2262,36 +2416,12 @@ def manage_materials():
         ORDER BY c.sort_order, m.item_code
         LIMIT 2000
     """)
-    if df.empty:
-        st.info("No materials.")
-        return
-
-    active = df[df["deleted"] == 0].copy()
-    st.dataframe(
-        active[["category", "item_code", "name", "unit", "unit_price", "min_unit_price", "max_unit_price"]],
-        use_container_width=True, hide_index=True, height=min(420, 38 + 35 * len(active)),
-    )
-
-    with st.expander("Edit Unit Price"):
-        ep1, ep2 = st.columns(2)
-        edit_id = ep1.number_input("Material ID", min_value=1, step=1, key="_edit_mat_id")
-        edit_price = ep2.number_input("New Unit Price", min_value=0.0, step=0.001, format="%.3f", key="_edit_mat_price")
-        if st.button("Update Price", key="_edit_mat_btn"):
-            exec_sql("UPDATE materials SET unit_price=? WHERE id=?", (float(edit_price), int(edit_id)))
-            st.success(f"Material #{edit_id} price updated to {edit_price:.3f}")
-            st.rerun()
-
-    del_id = st.number_input("Material ID to delete (soft)", min_value=1, step=1, key="_del_mat_id")
-    if st.button("Delete Material", key="_del_mat_btn"):
-        exec_sql("UPDATE materials SET deleted=1 WHERE id=?", (int(del_id),))
-        st.success(f"Material #{del_id} soft-deleted.")
-        st.rerun()
-
+    st.dataframe(df, use_container_width=True, height=520)
 
 def manage_settings():
-    st.subheader("System Parameter Settings")
+    st.subheader("system parameter setting")
     permitted = get_setting("unit_price_adjustment_permitted", "Yes")
-    yn = st.radio("Unit Price Adjustment Permitted", ["Yes", "No"], index=0 if permitted == "Yes" else 1, horizontal=True)
+    yn = st.radio("Unit Price Adjustment Permitted", ["Yes", "No"], index=0 if permitted=="Yes" else 1, horizontal=True)
     if st.button("Save Settings", type="primary"):
         exec_sql("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", ("unit_price_adjustment_permitted", yn))
         st.success("Saved.")
@@ -2348,14 +2478,14 @@ def manage_page():
     topbar("管理")
     menu = [
         ("票据明细信息查询", manage_receipt_detail_inquiry),
-        ("日票据汇总信息查询", manage_daily_summary),
+        ("日票据汇总信息查询", _manage_placeholder),
         ("月票据汇总信息查询", manage_monthly_summary_page),
-        ("年票据汇总信息查询", manage_annual_summary),
-        ("票据作废", manage_void_receipts),
-        ("客户信息管理", manage_clients),
-        ("操作员信息管理", manage_operators),
-        ("物料信息管理", manage_materials),
-        ("系统参数设置", manage_settings),
+        ("年票据汇总信息查询", _manage_placeholder),
+        ("票据作废", _manage_placeholder),
+        ("客户信息管理", _manage_placeholder),
+        ("操作员信息管理", _manage_placeholder),
+        ("物料信息管理", _manage_placeholder),
+        ("系统参数设置", _manage_placeholder),
     ]
 
     left, right = st.columns([0.23, 0.77], gap="medium")
