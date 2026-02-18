@@ -2187,7 +2187,7 @@ def manage_receipt_detail_inquiry():
         LIMIT 500
     """, (from_str, to_str))
 
-    # ── Ticket Report 弹窗 ──
+    # ── Ticket Report 弹窗（点击时立即打开，不延迟）──
     if report_click:
         rows = qdf("""
             SELECT r.* FROM receipts r
@@ -2195,16 +2195,6 @@ def manage_receipt_detail_inquiry():
             ORDER BY r.id
         """, (from_str, to_str)).to_dict("records")
         report_html = _rdi_build_report_html(from_str, to_str, rows)
-        # 用时间戳确保每次点击都能触发
-        st.session_state._rdi_report_ts = time.time()
-        st.session_state._rdi_report_html = report_html
-
-    # 检查是否有待打开的 report（用时间戳避免重复打开）
-    if st.session_state.get("_rdi_report_html") and st.session_state.get("_rdi_report_ts"):
-        report_html = st.session_state._rdi_report_html
-        report_ts = st.session_state._rdi_report_ts
-        del st.session_state["_rdi_report_html"]
-        del st.session_state["_rdi_report_ts"]
         b64 = base64.b64encode(report_html.encode("utf-8")).decode("ascii")
         js = f"""<script>
 (function() {{
