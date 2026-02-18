@@ -1914,19 +1914,22 @@ def _rdi_ticket_detail_view(rid):
     issued_by = (receipt["issued_by"] or "").strip() or "-"
     method = (receipt["ticketing_method"] or "").strip() or "-"
 
-    # ── Header ──
+    # ── Header（含 Ticket Id，避免重叠）──
     st.markdown(
-        f"""<div style="background:#2c3e50;color:white;padding:10px 16px;border-radius:6px 6px 0 0;font-size:14px;">
-        <b>Ticket Details</b>
-        <span style="float:right;font-size:12px;">Home / Ticket Details</span>
+        f"""<div style="background:#2c3e50;color:white;padding:10px 16px;border-radius:6px;font-size:14px;margin-bottom:8px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <b>Ticket Details</b>
+          <span style="font-size:12px;">Home / Ticket Details</span>
+        </div>
+        <div style="margin-top:8px;font-size:15px;font-weight:700;">Ticket Id : {rid} / {status_text}</div>
         </div>""",
         unsafe_allow_html=True,
     )
 
-    # Ticket Id / Status + Back / Confirm Change
+    # Back / Confirm Change
     hd1, hd2 = st.columns([6, 4])
     with hd1:
-        st.markdown(f"**Ticket Id : {rid} / {status_text}**")
+        pass
     with hd2:
         bc1, bc2 = st.columns(2)
         with bc1:
@@ -2192,11 +2195,16 @@ def manage_receipt_detail_inquiry():
             ORDER BY r.id
         """, (from_str, to_str)).to_dict("records")
         report_html = _rdi_build_report_html(from_str, to_str, rows)
+        # 用时间戳确保每次点击都能触发
+        st.session_state._rdi_report_ts = time.time()
         st.session_state._rdi_report_html = report_html
 
-    if st.session_state.get("_rdi_report_html"):
+    # 检查是否有待打开的 report（用时间戳避免重复打开）
+    if st.session_state.get("_rdi_report_html") and st.session_state.get("_rdi_report_ts"):
         report_html = st.session_state._rdi_report_html
+        report_ts = st.session_state._rdi_report_ts
         del st.session_state["_rdi_report_html"]
+        del st.session_state["_rdi_report_ts"]
         b64 = base64.b64encode(report_html.encode("utf-8")).decode("ascii")
         js = f"""<script>
 (function() {{
