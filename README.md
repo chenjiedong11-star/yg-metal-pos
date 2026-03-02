@@ -65,7 +65,7 @@ components/
 
 - **Phase 2 — State Machine**: Ticketing uses step enums (`SELECT_ITEM` → `GROSS_INPUT` → `TARE_INPUT` → `CONFIRM` → `DONE`) with `transition_lock` to prevent race conditions.
 - **Phase 3 — DB Transactions**: `get_connection()` context manager with auto-commit/rollback. `finalize_ticket()` is fully atomic.
-- **Phase 4 — JS Debounce**: Keypad clicks are debounced (~150 ms). Enter key freezes input during transition.
+- **Phase 4 — JS Debounce**: Keypad clicks are debounced (~150 ms). Enter key freezes input during transition
 - **Phase 5 — Navigation**: Page switches use a sentinel value (`__switching__`) to force Streamlit to detect changes.
 
 ## Testing

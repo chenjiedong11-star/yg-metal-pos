@@ -93,6 +93,12 @@ def void_ticket(receipt_id: int):
             "UPDATE receipts SET voided = 1 WHERE id = ?", (receipt_id,))
 
 
+def restore_ticket(receipt_id: int):
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE receipts SET voided = 0 WHERE id = ?", (receipt_id,))
+
+
 def update_receipt_lines(edited_lines, rounding, receipt_id):
     """
     Save edited receipt lines and recalculated subtotal.
@@ -149,9 +155,9 @@ def get_void_receipts_df():
         SELECT id, issue_time, issued_by,
                (SELECT COUNT(*) FROM receipt_lines rl WHERE rl.receipt_id=r.id) AS material_count,
                subtotal, rounding_amount, ticketing_method,
-               CASE WHEN withdrawn=1 THEN 'Withdrawn' ELSE 'Undrawn' END AS withdraw_status,
-               CASE WHEN voided=1 THEN 'Voided' ELSE 'Not Voided' END AS void_status
+               CASE WHEN withdrawn=1 THEN 'Withdrawn' ELSE 'Undrawn' END AS withdraw_status
         FROM receipts r
+        WHERE voided = 1
         ORDER BY id DESC
         LIMIT 500
     """)

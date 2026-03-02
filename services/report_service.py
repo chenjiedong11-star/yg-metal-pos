@@ -42,16 +42,42 @@ def get_monthly_invoice_summary(_start_date=None, _end_date=None, _status=None):
     return pd.concat([total_row, out], ignore_index=True)
 
 
-def get_daily_summary_df():
-    return qdf("""
+def get_daily_summary_df(start_date=None, end_date=None,
+                         method_filter=None, void_filter=None,
+                         withdrawn_filter=None):
+    """Daily summary with optional filters matching ScrapGoGo search dialog."""
+    where = []
+    params = []
+
+    if start_date:
+        where.append("substr(issue_time,1,10) >= ?")
+        params.append(start_date)
+    if end_date:
+        where.append("substr(issue_time,1,10) <= ?")
+        params.append(end_date)
+    if method_filter and method_filter != "All":
+        where.append("ticketing_method = ?")
+        params.append(method_filter)
+    if void_filter == "Not Voided":
+        where.append("voided = 0")
+    elif void_filter == "Voided":
+        where.append("voided = 1")
+    if withdrawn_filter == "Undrawn":
+        where.append("withdrawn = 0")
+    elif withdrawn_filter == "Withdrawn":
+        where.append("withdrawn = 1")
+
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+
+    return qdf(f"""
         SELECT substr(issue_time,1,10) AS issue_date,
-               SUM((SELECT COALESCE(SUM(net),0) FROM receipt_lines rl
-                    WHERE rl.receipt_id=r.id)) AS invoiced_quantity,
-               SUM(subtotal) AS subtotal,
-               SUM(rounding_amount) AS rounding_amount
-        FROM receipts r WHERE voided=0
+               COUNT(*) AS invoiced_quantity,
+               COALESCE(SUM(subtotal),0) AS subtotal,
+               COALESCE(SUM(rounding_amount),0) AS rounding_amount
+        FROM receipts r
+        {where_sql}
         GROUP BY issue_date ORDER BY issue_date DESC LIMIT 1000
-    """)
+    """, tuple(params))
 
 
 def get_monthly_summary_df():

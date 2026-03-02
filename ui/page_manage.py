@@ -14,7 +14,8 @@ import pandas as pd
 from components.navigation import topbar
 from components.printer import open_print_window
 from db.repo_ticketing import (
-    get_receipt, get_receipt_lines, void_ticket, update_receipt_lines,
+    get_receipt, get_receipt_lines, void_ticket, restore_ticket,
+    update_receipt_lines,
     get_receipt_detail_inquiry_df, get_ticket_report_rows,
     get_void_receipts_df,
 )
@@ -478,18 +479,189 @@ def manage_operators_crud():
 # ---------------------------------------------------------------------------
 
 def manage_void_receipts():
-    st.subheader("Void / Withdraw Processing")
+    st.subheader("票据作废")
     df = get_void_receipts_df()
     if df.empty:
-        st.info("No receipts yet.")
+        st.info("目前没有已作废的单据。")
         return
-    st.dataframe(df, use_container_width=True, height=520)
+
+    st.caption(f"共 {len(df)} 条已作废单据")
+
+    hdr = st.columns([0.5, 1.2, 0.8, 0.6, 0.8, 0.8, 0.8, 0.7])
+    hdr[0].markdown("**#ID**")
+    hdr[1].markdown("**开票时间**")
+    hdr[2].markdown("**开票人**")
+    hdr[3].markdown("**品项数**")
+    hdr[4].markdown("**小计**")
+    hdr[5].markdown("**舍入**")
+    hdr[6].markdown("**方式**")
+    hdr[7].markdown("**操作**")
+
+    for _, row in df.iterrows():
+        rid = int(row["id"])
+        c = st.columns([0.5, 1.2, 0.8, 0.6, 0.8, 0.8, 0.8, 0.7])
+        c[0].text(str(rid))
+        c[1].text(str(row["issue_time"] or ""))
+        c[2].text(str(row["issued_by"] or ""))
+        c[3].text(str(row["material_count"]))
+        c[4].text(f"${float(row['subtotal'] or 0):,.2f}")
+        c[5].text(f"${float(row['rounding_amount'] or 0):,.2f}")
+        c[6].text(str(row["ticketing_method"] or ""))
+        with c[7]:
+            if st.button("恢复", key=f"void_restore_{rid}", use_container_width=True):
+                restore_ticket(rid)
+                st.success(f"单据 #{rid} 已恢复")
+                st.rerun()
 
 
 def manage_daily_summary():
     st.subheader("Daily Transaction Summary")
-    df = get_daily_summary_df()
-    st.dataframe(df, use_container_width=True, height=520)
+
+    # ── Toolbar: Export to Excel | Refresh | Search ──
+    tb1, tb2, tb_spacer, tb3 = st.columns([1, 1, 3, 1])
+    with tb1:
+        export_click = st.button("Export to Excel", type="primary",
+                                 use_container_width=True, key="dts_export")
+    with tb2:
+        refresh_click = st.button("Refresh", use_container_width=True, key="dts_refresh")
+    with tb3:
+        search_click = st.button("Search", use_container_width=True, key="dts_search")
+
+    if search_click:
+        st.session_state._dts_search_open = True
+    if refresh_click:
+        for k in ("_dts_start", "_dts_end", "_dts_method", "_dts_void", "_dts_withdrawn"):
+            st.session_state.pop(k, None)
+        st.session_state.pop("_dts_search_open", None)
+        st.session_state.pop("_dts_page", None)
+        st.rerun()
+
+    # ── Search conditions dialog ──
+    if st.session_state.get("_dts_search_open"):
+        with st.expander("Enter Conditions", expanded=True):
+            sc1, sc2 = st.columns(2)
+            with sc1:
+                s_start = st.date_input("Receipting Start Date",
+                                        value=st.session_state.get("_dts_start"),
+                                        key="dts_sd")
+            with sc2:
+                s_end = st.date_input("Receipting End Date",
+                                      value=st.session_state.get("_dts_end"),
+                                      key="dts_ed")
+
+            s_method = st.radio("Ticketing method",
+                                ["All", "Print", "Email"],
+                                index=0, horizontal=True, key="dts_method_r")
+            s_void = st.radio("Void Mark",
+                              ["All", "Not Voided", "Voided"],
+                              index=0, horizontal=True, key="dts_void_r")
+            s_withdrawn = st.radio("Customer service representative",
+                                   ["All", "Undrawn", "Withdrawn"],
+                                   index=0, horizontal=True, key="dts_withdrawn_r")
+
+            dc1, dc2 = st.columns(2)
+            with dc1:
+                if st.button("Confirm", type="primary", use_container_width=True,
+                             key="dts_confirm"):
+                    st.session_state._dts_start = s_start
+                    st.session_state._dts_end = s_end
+                    st.session_state._dts_method = s_method
+                    st.session_state._dts_void = s_void
+                    st.session_state._dts_withdrawn = s_withdrawn
+                    st.session_state._dts_search_open = False
+                    st.session_state._dts_page = 1
+                    st.rerun()
+            with dc2:
+                if st.button("Cancel", use_container_width=True, key="dts_cancel"):
+                    st.session_state._dts_search_open = False
+                    st.rerun()
+
+    # ── Query with current filters ──
+    f_start = st.session_state.get("_dts_start")
+    f_end = st.session_state.get("_dts_end")
+    f_method = st.session_state.get("_dts_method", "All")
+    f_void = st.session_state.get("_dts_void", "All")
+    f_withdrawn = st.session_state.get("_dts_withdrawn", "All")
+
+    start_str = f_start.strftime("%Y-%m-%d") if f_start else None
+    end_str = f_end.strftime("%Y-%m-%d") if f_end else None
+
+    df = get_daily_summary_df(start_date=start_str, end_date=end_str,
+                              method_filter=f_method, void_filter=f_void,
+                              withdrawn_filter=f_withdrawn)
+
+    # ── Export handler ──
+    if export_click and not df.empty:
+        import io
+        buf = io.BytesIO()
+        df.to_excel(buf, index=False, engine="openpyxl")
+        ts_str = datetime.now().strftime("%Y%m%d_%H%M")
+        st.download_button("Download Excel", data=buf.getvalue(),
+                           file_name=f"daily_transaction_summary_{ts_str}.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           key="dts_dl")
+
+    if df.empty:
+        st.info("No data for current filters.")
+        return
+
+    # ── Rename columns to match ScrapGoGo ──
+    display = df.rename(columns={
+        "issue_date": "Issue Time",
+        "invoiced_quantity": "Invoiced quantity",
+        "subtotal": "Subtotal",
+        "rounding_amount": "Rounding Amount",
+    })
+
+    # ── Subtotal row at top ──
+    subtotal_row = pd.DataFrame([{
+        "Issue Time": "Subtotal",
+        "Invoiced quantity": display["Invoiced quantity"].sum(),
+        "Subtotal": round(display["Subtotal"].sum(), 2),
+        "Rounding Amount": round(display["Rounding Amount"].sum(), 2),
+    }])
+    full_df = pd.concat([subtotal_row, display], ignore_index=True)
+
+    # ── Pagination (100 rows per page) ──
+    page_size = 100
+    total_rows = len(full_df)
+    total_pages = max(1, (total_rows + page_size - 1) // page_size)
+    if "_dts_page" not in st.session_state:
+        st.session_state._dts_page = 1
+    cur_page = min(st.session_state._dts_page, total_pages)
+
+    start_idx = (cur_page - 1) * page_size
+    end_idx = min(start_idx + page_size, total_rows)
+    page_df = full_df.iloc[start_idx:end_idx]
+
+    # ── Render table ──
+    st.dataframe(page_df, use_container_width=True,
+                 height=min(600, 35 * len(page_df) + 40), hide_index=True)
+
+    # ── Pagination bar ──
+    st.markdown(
+        f"<span style='font-size:12px;color:#888;'>"
+        f"showing {start_idx + 1}–{end_idx} of {total_rows} rows</span>",
+        unsafe_allow_html=True)
+    if total_pages > 1:
+        max_btns = min(total_pages, 7)
+        cols = st.columns(max_btns + 2)
+        with cols[0]:
+            if st.button("«", key="dts_pg_prev", disabled=(cur_page <= 1)):
+                st.session_state._dts_page = cur_page - 1
+                st.rerun()
+        for i in range(max_btns):
+            pn = i + 1
+            with cols[i + 1]:
+                btn_t = "primary" if pn == cur_page else "secondary"
+                if st.button(str(pn), key=f"dts_pg_{pn}", type=btn_t,
+                             use_container_width=True):
+                    st.session_state._dts_page = pn
+                    st.rerun()
+        with cols[max_btns + 1]:
+            if st.button("»", key="dts_pg_next", disabled=(cur_page >= total_pages)):
+                st.session_state._dts_page = cur_page + 1
+                st.rerun()
 
 
 def manage_monthly_summary():
@@ -508,8 +680,9 @@ def manage_settings():
     st.subheader("System Settings")
     permitted = get_setting("unit_price_adjustment_permitted", "Yes")
     yn = st.radio("Unit Price Adjustment Permitted", ["Yes", "No"],
-                  index=0 if permitted == "Yes" else 1, horizontal=True)
-    if st.button("Save Settings", type="primary"):
+                  index=0 if permitted == "Yes" else 1, horizontal=True,
+                  key="mgr_price_adj_radio")
+    if st.button("Save Settings", type="primary", key="mgr_save_settings"):
         save_setting("unit_price_adjustment_permitted", yn)
         st.success("Saved.")
         st.rerun()
@@ -524,9 +697,10 @@ def manage_monthly_summary_page():
         st.download_button(
             "导出数据到excel", data=excel_bytes,
             file_name=f"monthly_invoice_summary_{ts_str}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="msp_export")
     with col_btn2:
-        if st.button("刷新数据"):
+        if st.button("刷新数据", key="msp_refresh"):
             get_monthly_invoice_summary.clear()
             st.success("刷新成功")
             st.rerun()
@@ -541,11 +715,67 @@ def manage_monthly_summary_page():
 # Main manage page
 # ---------------------------------------------------------------------------
 
+_MANAGE_MENU_CSS = """
+<style>
+/* ── Nav menu radio → bordered button boxes ──
+   Target: the FIRST stColumn's radio (= the 22% left menu column).
+   Streamlit renders st.markdown and st.radio as siblings, NOT nested,
+   so we must use the column data-testid as the anchor.               */
+
+[data-testid="stColumn"]:first-child [data-testid="stRadio"] > div[role="radiogroup"] {
+    gap: 0 !important;
+}
+[data-testid="stColumn"]:first-child [data-testid="stRadio"] > div[role="radiogroup"] > label {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+    background: #fff !important;
+    color: #333 !important;
+    border: 1px solid #d1d5db !important;
+    border-radius: 6px !important;
+    margin: 0 0 -1px 0 !important;
+    padding: 14px 14px !important;
+    cursor: pointer !important;
+    min-height: 48px !important;
+    font-size: 0.88rem !important;
+    font-weight: 500 !important;
+    transition: background 0.15s, color 0.15s !important;
+}
+[data-testid="stColumn"]:first-child [data-testid="stRadio"] > div[role="radiogroup"] > label:hover {
+    background: #f3f4f6 !important;
+}
+/* Selected item → red */
+[data-testid="stColumn"]:first-child [data-testid="stRadio"] > div[role="radiogroup"] > label[data-checked="true"],
+[data-testid="stColumn"]:first-child [data-testid="stRadio"] > div[role="radiogroup"] > label:has(input:checked) {
+    background: #ef4444 !important;
+    color: #fff !important;
+    font-weight: 600 !important;
+    border-color: #ef4444 !important;
+    z-index: 1;
+    position: relative;
+}
+/* Inner text inherits color */
+[data-testid="stColumn"]:first-child [data-testid="stRadio"] > div[role="radiogroup"] > label p,
+[data-testid="stColumn"]:first-child [data-testid="stRadio"] > div[role="radiogroup"] > label span {
+    color: inherit !important;
+    font-size: inherit !important;
+}
+/* Hide radio circle/dot */
+[data-testid="stColumn"]:first-child [data-testid="stRadio"] > div[role="radiogroup"] > label > div:first-child {
+    display: none !important;
+}
+</style>
+"""
+
+
 def manage_page():
     if not st.session_state.get("ticket_operator"):
         st.warning("请先登录后再访问管理页。")
         return
     topbar("管理")
+
     menu = [
         ("票据明细信息查询", manage_receipt_detail_inquiry),
         ("日票据汇总信息查询", manage_daily_summary),
@@ -559,14 +789,23 @@ def manage_page():
         ("系统参数设置", manage_settings),
     ]
 
-    left, right = st.columns([0.23, 0.77], gap="medium")
+    labels = [m[0] for m in menu]
+    if st.session_state.get("manage_page") not in labels:
+        st.session_state.manage_page = labels[0]
+
+    def _on_nav_change():
+        st.session_state.manage_page = st.session_state._mnav_radio
+
+    left, right = st.columns([0.22, 0.78], gap="small")
+
     with left:
-        st.markdown("### 菜单")
-        labels = [m[0] for m in menu]
-        idx = (labels.index(st.session_state.manage_page)
-               if st.session_state.manage_page in labels else 0)
-        sel = st.radio("", labels, index=idx, label_visibility="collapsed")
-        st.session_state.manage_page = sel
+        st.markdown(_MANAGE_MENU_CSS, unsafe_allow_html=True)
+        st.markdown(
+            '<div style="font-size:1.15rem;font-weight:700;padding:10px 4px 8px;">Menu</div>',
+            unsafe_allow_html=True)
+        cur_idx = labels.index(st.session_state.manage_page)
+        st.radio("菜单", labels, index=cur_idx, key="_mnav_radio",
+                 on_change=_on_nav_change, label_visibility="collapsed")
 
     with right:
         for label, fn in menu:

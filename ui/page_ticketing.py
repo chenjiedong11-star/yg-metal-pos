@@ -1,18 +1,15 @@
 """
-Ticketing page — ScrapGoGo two-column layout.
-  Left : category tabs + product grid
-  Right: client + input area + keypad + receipt
-
-Bug fixes applied:
-  Bug 1: focus_js retry schedule extended to 500ms for reliable auto-focus
-  Bug 2: tare uses a SINGLE widget key (no key swap) to prevent stale cache
-  Bug 3: data_editor key includes _receipt_edit_ver counter → fresh on every change
+Ticketing page — original ScrapGoGo three-column layout restored.
+  Left : Receipt Preview Area (client, subtotal, receipt table, print)
+  Mid  : Material List Area (categories + product grid + cameras)
+  Right: Receiving Area (client search, material, inputs, keypad)
 """
 
 import time
 from datetime import datetime
 
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 
 from core.utils import calc_line, recompute_receipt_df, current_subtotal
@@ -43,135 +40,35 @@ def ticketing_page():
     cats = get_categories()
     mats = get_materials()
 
-    # ===================== TWO-COLUMN LAYOUT (B2) =====================
-    col_left, col_right = st.columns([1.3, 1.0], gap="medium")
+    # ===================== THREE-COLUMN LAYOUT (original) =====================
+    left, mid, right = st.columns([1.25, 2.1, 1.25], gap="medium")
 
     # ================================================================
-    # LEFT COLUMN: Categories + Products
+    # LEFT COLUMN: Receipt Preview Area
     # ================================================================
-    with col_left:
-        st.markdown("### Material List")
+    with left:
+        st.markdown("### Receipt Preview Area")
         st.markdown('<div class="box">', unsafe_allow_html=True)
 
-        catcol, prodcol = st.columns([0.3, 1.7], gap="small")
+        if st.session_state.get("_pending_print_html"):
+            open_print_window(st.session_state._pending_print_html)
+            _wcode = st.session_state.get("_pending_print_wcode", "")
+            st.success(f"Saved. Withdraw code: {_wcode}")
+            del st.session_state["_pending_print_html"]
+            if "_pending_print_wcode" in st.session_state:
+                del st.session_state["_pending_print_wcode"]
 
-        with catcol:
-            for cname in cats["name"].tolist():
-                is_active = (st.session_state.active_cat == cname)
-                btn_type = "primary" if is_active else "secondary"
-                if st.button(cname, type=btn_type, use_container_width=True,
-                             key=f"cat_{cname}"):
-                    st.session_state.active_cat = cname
-                    st.rerun()
+        csel = clients[clients["code"] == st.session_state.ticket_client_code]
+        clabel = "(未选择)"
+        if len(csel) > 0:
+            clabel = f'{csel.iloc[0]["name"]}'.strip()
 
-        with prodcol:
-            show = mats[mats["category"] == st.session_state.active_cat].copy()
-            if show.empty:
-                st.info("No materials in this category.")
-            else:
-                cols = st.columns(2, gap="small")
-                for i, row in enumerate(show.itertuples(index=False)):
-                    c = cols[i % 2]
-                    with c:
-                        if st.button(row.name, use_container_width=True,
-                                     key=f"mat_{row.id}"):
-                            st.session_state.picked_material_id = int(row.id)
-                            st.session_state.picked_material_name = row.name
-                            st.session_state.unit_price_input = str(
-                                row.unit_price if row.unit_price is not None else "")
-                            st.session_state._reset_line_fields = True
-                            st.session_state.focus_request = "gross"
-                            st.session_state.key_target = "gross"
-                            transition_step(STEP_GROSS_INPUT)
-                            unlock_transition()
-                            st.rerun()
-
-        st.markdown("<hr style='margin:0.5rem 0;border:none;border-top:1px solid #e5e7eb;'>",
-                    unsafe_allow_html=True)
-        cam1, cam2 = st.columns(2, gap="small")
-        with cam1:
-            st.markdown(
-                '<div style="height:100px;width:100%;border:1px dashed #9ca3af;border-radius:0.25rem;'
-                'display:flex;align-items:center;justify-content:center;color:#6b7280;font-size:0.875em;">'
-                '📷 摄像头 1</div>',
-                unsafe_allow_html=True)
-        with cam2:
-            st.markdown(
-                '<div style="height:100px;width:100%;border:1px dashed #9ca3af;border-radius:0.25rem;'
-                'display:flex;align-items:center;justify-content:center;color:#6b7280;font-size:0.875em;">'
-                '📷 摄像头 2</div>',
-                unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    # ================================================================
-    # RIGHT COLUMN: Receipt + Inputs + Keypad
-    # ================================================================
-    with col_right:
-        # ---------- Client selector (compact) ----------
-        st.text_input("Search Client", key="client_search",
-                      placeholder="输入编码/名字/电话...")
-        term = (st.session_state.client_search or "").strip().lower()
-        f = clients.copy()
-        if term:
-            def hit(x):
-                s = f'{x["code"]} {x["name"]} {x["phone"]}'.lower()
-                return term in s
-            f = f[f.apply(hit, axis=1)]
-
-        if f.empty:
-            options = ["(No match)"]
-            code_map = {"(No match)": st.session_state.ticket_client_code}
-        else:
-            options = [f'{r["code"]} • {r["name"]} {r["phone"]}'.strip()
-                       for _, r in f.iterrows()]
-            code_map = {lab: lab.split("•")[0].strip() for lab in options}
-
-        current_label = None
-        for lab, cc in code_map.items():
-            if cc == st.session_state.ticket_client_code:
-                current_label = lab
-                break
-        if current_label is None:
-            current_label = options[0]
-
-        r1a, r1b = st.columns([1.4, 0.6], gap="small")
-        with r1a:
-            sel = st.selectbox(
-                "", options=options,
-                index=options.index(current_label) if current_label in options else 0,
-                key="client_selectbox", label_visibility="collapsed")
-            st.session_state.ticket_client_code = code_map.get(
-                sel, st.session_state.ticket_client_code)
-        with r1b:
-            if st.button("Add Client", use_container_width=True):
-                st.session_state._show_add_client = True
-
-        if st.session_state._show_add_client:
-            with st.expander("Add Client", expanded=True):
-                nm = st.text_input("Name", key="new_client_name")
-                ph = st.text_input("Phone (optional)", key="new_client_phone")
-                ac1, ac2 = st.columns(2)
-                with ac1:
-                    if st.button("Create", type="primary", use_container_width=True):
-                        if nm.strip() == "" and ph.strip() == "":
-                            st.warning("Please enter name or phone.")
-                        else:
-                            code = save_customer(nm, ph)
-                            st.success(f"Created: {code}")
-                            st.session_state.ticket_client_code = code
-                            st.session_state._show_add_client = False
-                            st.session_state.client_search = ""
-                            st.rerun()
-                with ac2:
-                    if st.button("Cancel", use_container_width=True):
-                        st.session_state._show_add_client = False
-                        st.rerun()
-
-        # ---------- Receipt table ----------
         st.markdown(
-            f"<div style='line-height:1.3;margin:4px 0;'>"
-            f"<span style='color:#6b7280;font-size:0.8em;'>Subtotal:</span> "
-            f"<span style='font-size:1.2rem;font-weight:950;'>${current_subtotal():.2f}</span>"
+            f"<div style='line-height:1.4;margin-bottom:8px;'>"
+            f"<span style='color:#6b7280;font-size:0.8em;'>Client:</span><br>"
+            f"<span style='font-weight:900;'>{clabel}</span><br>"
+            f"<span style='color:#6b7280;font-size:0.8em;'>Subtotal:</span><br>"
+            f"<span style='font-size:1.3rem;font-weight:950;'>${current_subtotal():.2f}</span>"
             f"</div>",
             unsafe_allow_html=True)
 
@@ -183,13 +80,12 @@ def ticketing_page():
         if df.empty:
             st.info("No items yet.")
         else:
-            # Bug 3 fix: version counter in key forces fresh widget on data change
             ver = st.session_state.get("_receipt_edit_ver", 0)
             edited = st.data_editor(
-                df, use_container_width=True, height=160, hide_index=True,
+                df, use_container_width=True, height=180, hide_index=True,
                 key=f"receipt_data_editor_{ver}",
                 column_config={
-                    "Del": st.column_config.CheckboxColumn("删", help="勾选删除"),
+                    "Del": st.column_config.CheckboxColumn("删", help="勾选即删除此行"),
                     "material": st.column_config.TextColumn("material", disabled=True),
                     "unit_price": st.column_config.NumberColumn("price", step=0.01, format="%.2f"),
                     "gross": st.column_config.NumberColumn("gross", step=1.0, format="%.0f"),
@@ -209,8 +105,8 @@ def ticketing_page():
                     df[["unit_price", "gross", "tare"]]):
                 st.rerun()
 
-        rcA, rcB = st.columns(2)
-        with rcA:
+        colA, colB = st.columns(2)
+        with colA:
             if st.button("Clear Receipt", use_container_width=True):
                 st.session_state.receipt_df = pd.DataFrame(
                     columns=["Del", "material", "unit_price", "gross", "tare", "net", "total"])
@@ -219,7 +115,7 @@ def ticketing_page():
                     if k in st.session_state:
                         del st.session_state[k]
                 st.rerun()
-        with rcB:
+        with colB:
             if st.button("Print / Save Receipt", type="primary", use_container_width=True):
                 st.session_state["_print_debug_ts"] = time.time()
                 df2 = recompute_receipt_df(st.session_state.receipt_df)
@@ -272,34 +168,235 @@ def ticketing_page():
                 bump_receipt_ver()
                 st.rerun()
 
-        # Pending print handler
-        if st.session_state.get("_pending_print_html"):
-            open_print_window(st.session_state._pending_print_html)
-            _wcode = st.session_state.get("_pending_print_wcode", "")
-            st.success(f"Saved. Withdraw code: {_wcode}")
-            del st.session_state["_pending_print_html"]
-            if "_pending_print_wcode" in st.session_state:
-                del st.session_state["_pending_print_wcode"]
+        st.caption(f"print_debug_ts={st.session_state.get('_print_debug_ts')}")
+        st.markdown("</div>", unsafe_allow_html=True)
 
-        st.markdown("---")
+    # ================================================================
+    # MIDDLE COLUMN: Material List Area
+    # ================================================================
+    with mid:
+        st.markdown("### Material List Area")
+        st.markdown('<div class="box">', unsafe_allow_html=True)
 
-        # ---------- Material + Input area ----------
+        catcol, prodcol = st.columns([0.35, 1.65], gap="medium")
+
+        with catcol:
+            for cname in cats["name"].tolist():
+                is_active = (st.session_state.active_cat == cname)
+                btn_type = "primary" if is_active else "secondary"
+                if st.button(cname, type=btn_type, use_container_width=True,
+                             key=f"cat_{cname}"):
+                    st.session_state.active_cat = cname
+                    st.rerun()
+
+        with prodcol:
+            show = mats[mats["category"] == st.session_state.active_cat].copy()
+            if show.empty:
+                st.info("No materials in this category.")
+            else:
+                cols = st.columns(2, gap="small")
+                for i, row in enumerate(show.itertuples(index=False)):
+                    c = cols[i % 2]
+                    with c:
+                        if st.button(row.name, use_container_width=True,
+                                     key=f"mat_{row.id}"):
+                            st.session_state.picked_material_id = int(row.id)
+                            st.session_state.picked_material_name = row.name
+                            st.session_state.unit_price_input = str(
+                                row.unit_price if row.unit_price is not None else "")
+                            st.session_state._reset_line_fields = True
+                            st.session_state.focus_request = "gross"
+                            st.session_state.key_target = "gross"
+                            transition_step(STEP_GROSS_INPUT)
+                            unlock_transition()
+                            st.rerun()
+
+        st.markdown("<hr style='margin:0.3rem 0;border:none;border-top:1px solid #e5e7eb;'>",
+                    unsafe_allow_html=True)
+        st.markdown("<div style='height:200px;'></div>", unsafe_allow_html=True)
+        _DUAL_CAM_HTML = """
+<style>
+  body { margin: 0; padding: 0; background: transparent; }
+  .cam-row { display: flex; gap: 6px; width: 100%; }
+  .cam-box {
+    flex: 1; position: relative;
+    border: 1px solid #d1d5db; border-radius: 4px;
+    overflow: hidden; background: #111;
+    aspect-ratio: 16 / 9;
+  }
+  .cam-box video {
+    width: 100%; height: 100%;
+    object-fit: cover; display: block;
+  }
+  .cam-label {
+    position: absolute; top: 4px; left: 6px;
+    background: rgba(0,0,0,0.55); color: #fff;
+    font-size: 11px; padding: 1px 6px; border-radius: 3px;
+    pointer-events: none;
+  }
+  .cam-placeholder {
+    width: 100%; height: 100%;
+    display: flex; align-items: center; justify-content: center;
+    color: #9ca3af; font-size: 13px;
+  }
+</style>
+<div class="cam-row">
+  <div class="cam-box">
+    <video id="v1" autoplay playsinline muted></video>
+    <div class="cam-label">CAM 1</div>
+    <div id="p1" class="cam-placeholder" style="display:none;"></div>
+  </div>
+  <div class="cam-box">
+    <video id="v2" autoplay playsinline muted></video>
+    <div class="cam-label">CAM 2</div>
+    <div id="p2" class="cam-placeholder" style="display:none;"></div>
+  </div>
+</div>
+<script>
+(async () => {
+  const v1 = document.getElementById('v1');
+  const v2 = document.getElementById('v2');
+  const p1 = document.getElementById('p1');
+  const p2 = document.getElementById('p2');
+
+  function showPlaceholder(v, p, msg) {
+    v.style.display = 'none';
+    p.style.display = 'flex';
+    p.textContent = msg;
+  }
+
+  try {
+    // Request permission first with a generic call
+    const init = await navigator.mediaDevices.getUserMedia({ video: true });
+    init.getTracks().forEach(t => t.stop());
+
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const cams = devices.filter(d => d.kind === 'videoinput');
+
+    if (cams.length === 0) {
+      showPlaceholder(v1, p1, 'No camera detected');
+      showPlaceholder(v2, p2, 'No camera detected');
+      return;
+    }
+
+    // Camera 1
+    try {
+      const s1 = await navigator.mediaDevices.getUserMedia({
+        video: { deviceId: { exact: cams[0].deviceId } }
+      });
+      v1.srcObject = s1;
+    } catch(e) {
+      showPlaceholder(v1, p1, 'CAM 1 unavailable');
+    }
+
+    // Camera 2
+    if (cams.length >= 2) {
+      try {
+        const s2 = await navigator.mediaDevices.getUserMedia({
+          video: { deviceId: { exact: cams[1].deviceId } }
+        });
+        v2.srcObject = s2;
+      } catch(e) {
+        showPlaceholder(v2, p2, 'CAM 2 unavailable');
+      }
+    } else {
+      showPlaceholder(v2, p2, 'Only 1 camera found');
+    }
+  } catch(err) {
+    showPlaceholder(v1, p1, 'Permission denied');
+    showPlaceholder(v2, p2, 'Permission denied');
+  }
+})();
+</script>
+"""
+        components.html(_DUAL_CAM_HTML, height=280)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # ================================================================
+    # RIGHT COLUMN: Receiving Area
+    # ================================================================
+    with right:
+        st.markdown("### Receiving Area")
+        st.markdown('<div class="box">', unsafe_allow_html=True)
+
+        st.text_input("Search Client (code / name / phone)",
+                      key="client_search", placeholder="输入编码/名字/电话...")
+
+        term = (st.session_state.client_search or "").strip().lower()
+        f = clients.copy()
+        if term:
+            def hit(x):
+                s = f'{x["code"]} {x["name"]} {x["phone"]}'.lower()
+                return term in s
+            f = f[f.apply(hit, axis=1)]
+
+        if f.empty:
+            options = ["(No match)"]
+            code_map = {"(No match)": st.session_state.ticket_client_code}
+        else:
+            options = [f'{r["code"]} • {r["name"]} {r["phone"]}'.strip()
+                       for _, r in f.iterrows()]
+            code_map = {lab: lab.split("•")[0].strip() for lab in options}
+
+        current_label = None
+        for lab, cc in code_map.items():
+            if cc == st.session_state.ticket_client_code:
+                current_label = lab
+                break
+        if current_label is None:
+            current_label = options[0]
+
+        r1a, r1b = st.columns([1.35, 0.65], gap="small")
+        with r1a:
+            sel = st.selectbox(
+                "", options=options,
+                index=options.index(current_label) if current_label in options else 0,
+                key="client_selectbox", label_visibility="collapsed")
+            st.session_state.ticket_client_code = code_map.get(
+                sel, st.session_state.ticket_client_code)
+        with r1b:
+            if st.button("Add", use_container_width=True):
+                st.session_state._show_add_client = True
+
+        if st.session_state._show_add_client:
+            with st.expander("Add Client", expanded=True):
+                nm = st.text_input("Name", key="new_client_name")
+                ph = st.text_input("Phone (optional)", key="new_client_phone")
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.button("Create", type="primary", use_container_width=True):
+                        if nm.strip() == "" and ph.strip() == "":
+                            st.warning("Please enter name or phone.")
+                        else:
+                            code = save_customer(nm, ph)
+                            st.success(f"Created client code: {code}")
+                            st.session_state.ticket_client_code = code
+                            st.session_state._show_add_client = False
+                            st.session_state.client_search = ""
+                            st.rerun()
+                with c2:
+                    if st.button("Cancel", use_container_width=True):
+                        st.session_state._show_add_client = False
+                        st.rerun()
+
         st.markdown("**Material :**")
         if st.session_state.picked_material_name:
             st.success(st.session_state.picked_material_name)
         else:
-            st.info("Pick a material on the left.")
+            st.info("Pick a material in the middle area.")
 
         allow_price_edit = (get_setting("unit_price_adjustment_permitted", "Yes") == "Yes")
 
-        # Hidden switch buttons (for JS enter_workflow)
+        # Hidden switch buttons (clicked by JS enter_workflow)
         _sw_hide, _sw_main = st.columns([0.001, 99])
         with _sw_hide:
             st.markdown('<div id="switch-btns-marker"></div>', unsafe_allow_html=True)
-            _to_tare = st.button("→Tare", key="switch_to_tare")
-            _to_gross = st.button("→Gross", key="switch_to_gross")
-            _to_tare_key = st.button("TareKey", key="switch_to_tare_key")
-            _to_uprice = st.button("UPriceKey", key="switch_to_uprice")
+            _to_tare = st.button("→Tare", key="switch_to_tare", help="Enter from Gross 时自动触发")
+            _to_gross = st.button("→Gross", key="switch_to_gross", help="点击 Gross 时自动触发")
+            _to_tare_key = st.button("TareKey", key="switch_to_tare_key",
+                                     help="点击 Tare 时仅更新 key_target")
+            _to_uprice = st.button("UPriceKey", key="switch_to_uprice",
+                                   help="点击 Unit Price 时更新 key_target")
         if _to_uprice:
             st.session_state.key_target = "unit_price"
         if _to_gross:
@@ -319,7 +416,7 @@ def ticketing_page():
         if not st.session_state.get("picked_material_id"):
             st.session_state.unit_price_input = ""
 
-        # Pre-widget field reset (BEFORE widgets render)
+        # Pre-widget field reset
         if st.session_state._reset_line_fields:
             st.session_state.gross_input = ""
             st.session_state.tare_input = ""
@@ -334,6 +431,8 @@ def ticketing_page():
             st.session_state.tare_input = ""
 
         # Input widgets
+        st.markdown('<div id="scrap-gross-tare-marker" style="display:none"></div>',
+                    unsafe_allow_html=True)
         cA, cB, cC = st.columns([1.0, 1.0, 1.0], gap="small")
         with cA:
             unit_price_val = ((st.session_state.get("unit_price_input") or "")
@@ -345,8 +444,6 @@ def ticketing_page():
                           value=st.session_state.get("gross_input", ""),
                           key="gross_input")
         with cC:
-            # Bug 2 fix: SINGLE key "tare_input" always — just toggle disabled.
-            # This prevents Streamlit from restoring stale cached values on key swap.
             tare_enabled = bool(st.session_state.get("_entered_tare_for_line"))
             st.text_input("Tare (LB)",
                           value=st.session_state.get("tare_input", ""),
@@ -404,3 +501,5 @@ def ticketing_page():
             st.session_state._focus_counter = st.session_state.get("_focus_counter", 0) + 1
             focus_js(st.session_state.focus_request, st.session_state._focus_counter)
             st.session_state.focus_request = None
+
+        st.markdown("</div>", unsafe_allow_html=True)

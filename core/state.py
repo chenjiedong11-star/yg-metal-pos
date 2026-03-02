@@ -23,7 +23,7 @@ def ss_init(default_operator_email: str = "admin@youli-trade.com"):
     """Idempotent: only writes keys that do not yet exist."""
     defaults = {
         "top_nav": "开票",
-        "manage_page": "月票据汇总信息查询",
+        "manage_page": "票据明细信息查询",
         "ticket_client_code": "000001",
         "ticket_operator": default_operator_email,
         "active_cat": "Copper",

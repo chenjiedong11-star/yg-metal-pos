@@ -192,11 +192,15 @@ def render_enter_workflow_js():
         doc.__enterGuardBound = true;
         doc.__enterFrozen = false;
         doc.__enterFrozenValue = '';
+        doc.__enterFrozenLabel = '';
         doc.addEventListener('input', function(ev) {
           if (!doc.__enterFrozen) return;
           if (ev.target && ev.target.tagName === 'INPUT') {
-            var setter = Object.getOwnPropertyDescriptor(pWin.HTMLInputElement.prototype, 'value').set;
-            setter.call(ev.target, doc.__enterFrozenValue);
+            var evLabel = labelOf(ev.target);
+            if (evLabel && evLabel === doc.__enterFrozenLabel) {
+              var setter = Object.getOwnPropertyDescriptor(pWin.HTMLInputElement.prototype, 'value').set;
+              setter.call(ev.target, doc.__enterFrozenValue);
+            }
           }
         }, true);
       }
@@ -216,6 +220,7 @@ def render_enter_workflow_js():
 
         doc.__enterFrozen = true;
         doc.__enterFrozenValue = a.value;
+        doc.__enterFrozenLabel = lbl;
         a.blur();
 
         if (lbl.indexOf('Gross') >= 0) {

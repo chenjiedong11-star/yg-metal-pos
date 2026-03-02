@@ -5,10 +5,29 @@ B4: top menu does not overlap Ticketing/Manage content.
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 def inject_css():
     """Global CSS — called once per render cycle."""
+    components.html("""
+    <script>
+    (function(){
+      try {
+        var doc = window.parent.document;
+        function applyZoom(){
+          var vh = window.parent.innerHeight;
+          var z = Math.max(0.7, Math.min(1.35, vh / 900));
+          doc.documentElement.style.zoom = z;
+        }
+        applyZoom();
+        window.parent.removeEventListener('resize', window.__posZoom);
+        window.__posZoom = applyZoom;
+        window.parent.addEventListener('resize', applyZoom);
+      } catch(e){}
+    })();
+    </script>
+    """, height=0)
     st.markdown("""
     <style>
       html { font-size: 100%; }
