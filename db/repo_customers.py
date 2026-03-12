@@ -9,7 +9,7 @@ from db.connection import get_connection, qdf, qone, exec_sql
 
 
 def get_clients():
-    return qdf("SELECT code, name, phone FROM clients WHERE deleted=0 ORDER BY id DESC")
+    return qdf("SELECT code, name, phone, COALESCE(tier_level, 0) AS tier_level FROM clients WHERE deleted=0 ORDER BY id DESC")
 
 
 def gen_code_6() -> str:
@@ -36,16 +36,24 @@ def save_customer(name: str, phone: str) -> str:
 def get_all_clients_df():
     return qdf("""
         SELECT id, code AS 编号, name AS 姓名, id_number AS 身份证号码,
-               phone AS 手机号码, email AS 邮箱地址, deleted AS 删除标志
+               phone AS 手机号码, email AS 邮箱地址,
+               COALESCE(tier_level, 0) AS Tier级别, deleted AS 删除标志
         FROM clients ORDER BY id DESC LIMIT 2000
     """)
 
 
-def update_client(client_id: int, name: str, phone: str, email: str = "", id_number: str = ""):
+def update_client(client_id: int, name: str, phone: str, email: str = "",
+                   id_number: str = "", tier_level: int = 0):
     exec_sql(
-        "UPDATE clients SET name=?, phone=?, email=?, id_number=? WHERE id=?",
-        (name.strip(), phone.strip(), email.strip(), id_number.strip(), client_id),
+        "UPDATE clients SET name=?, phone=?, email=?, id_number=?, tier_level=? WHERE id=?",
+        (name.strip(), phone.strip(), email.strip(), id_number.strip(), int(tier_level), client_id),
     )
+
+
+def get_client_tier(client_code: str) -> int:
+    """Return tier_level for a client by code (0 = base price)."""
+    row = qone("SELECT COALESCE(tier_level, 0) AS tier_level FROM clients WHERE code=? AND deleted=0", (client_code,))
+    return int(row["tier_level"]) if row else 0
 
 
 def delete_client(client_id: int):

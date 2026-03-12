@@ -15,16 +15,34 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def test_compile_all():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    cache_dir = os.path.join(root, ".py_compile_cache")
+    os.makedirs(cache_dir, exist_ok=True)
     errors = []
     count = 0
     for f in sorted(glob.glob(os.path.join(root, "**", "*.py"), recursive=True)):
-        if "__pycache__" in f:
+        if "__pycache__" in f or ".py_compile_cache" in f:
             continue
         count += 1
         try:
-            py_compile.compile(f, doraise=True)
+            # Write .pyc into project to avoid permission errors in sandbox
+            base = os.path.relpath(f, root).replace(os.sep, "_")
+            cfile = os.path.join(cache_dir, base + ".pyc")
+            py_compile.compile(f, cfile=cfile, doraise=True)
         except py_compile.PyCompileError as e:
             errors.append(str(e))
+        except OSError:
+            # Fallback: compile without writing (syntax check only)
+            try:
+                py_compile.compile(f, doraise=True)
+            except py_compile.PyCompileError as e:
+                errors.append(str(e))
+    if cache_dir and os.path.isdir(cache_dir):
+        try:
+            for x in os.listdir(cache_dir):
+                os.remove(os.path.join(cache_dir, x))
+            os.rmdir(cache_dir)
+        except OSError:
+            pass
     assert not errors, f"Compile errors:\n" + "\n".join(errors)
     print(f"  [PASS] {count} .py files compile OK")
 
@@ -54,7 +72,7 @@ def test_db_init_and_tables():
         tables = {r["name"] for r in cur.fetchall()}
 
     required = {"clients", "operators", "material_categories", "materials",
-                "receipts", "receipt_lines", "settings"}
+                "receipts", "receipt_lines", "receipt_line_photos", "ticket_item_photos", "settings"}
     missing = required - tables
     assert not missing, f"Missing tables: {missing}"
     print(f"  [PASS] All required DB tables exist: {sorted(required)}")
@@ -117,6 +135,33 @@ def test_calc_line():
     print("  [PASS] calc_line(0.50, 100, 10) → net=90, total=45.00")
 
 
+def test_line_photos_write_read():
+    """Write image bytes via finalize_ticket into ticket_item_photos, read back via get_item_photos."""
+    from db.schema import init_db
+    from db.repo_ticketing import finalize_ticket, get_receipt_lines, get_item_photos
+
+    init_db()
+    fake_jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF" + b"\x00" * 1100
+    rid, verification = finalize_ticket(
+        "2025-01-01 12:00:00", "SmokeTest", "Print", "W000",
+        "000001", "Walk-in", 10.0, 10.0,
+        [("Test Material", 1.0, 10.0, 0.0, 10.0, 10.0)],
+        line_photos=[[(1, fake_jpeg), (2, fake_jpeg)]],
+    )
+    assert rid > 0
+    assert len(verification) == 1
+    assert verification[0]["photo_count"] == 2
+    assert all(L > 1000 for L in verification[0]["lengths"])
+    lines = get_receipt_lines(rid)
+    assert len(lines) == 1
+    line_id = int(lines.iloc[0]["id"])
+    photos = get_item_photos(line_id)
+    assert len(photos) == 2
+    assert photos[0][0] == 1 and len(photos[0][1]) > 1000
+    assert photos[1][0] == 2 and len(photos[1][1]) > 1000
+    print("  [PASS] ticket_item_photos BLOB write/read (finalize_ticket + get_item_photos)")
+
+
 def test_state_init():
     import streamlit as st
     from core.state import ss_init, bump_receipt_ver, STEP_SELECT_ITEM
@@ -138,6 +183,7 @@ def main():
         test_crud_material,
         test_clients,
         test_calc_line,
+        test_line_photos_write_read,
         test_state_init,
     ]
     passed = 0

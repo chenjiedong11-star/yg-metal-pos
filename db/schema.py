@@ -24,6 +24,7 @@ def init_db():
             phone TEXT,
             email TEXT,
             id_number TEXT,
+            tier_level INTEGER DEFAULT 0,
             deleted INTEGER DEFAULT 0,
             created_at TEXT
         )
@@ -115,6 +116,64 @@ def init_db():
             created_at TEXT NOT NULL
         )
         """)
+
+        # 每个 line item 两张照片（cam1 + cam2），存路径便于管理端读取（旧）
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS receipt_line_photos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            receipt_id INTEGER NOT NULL,
+            line_id INTEGER NOT NULL,
+            cam_index INTEGER NOT NULL,
+            photo_path TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            FOREIGN KEY (receipt_id) REFERENCES receipts(id),
+            FOREIGN KEY (line_id) REFERENCES receipt_lines(id)
+        )
+        """)
+
+        # MVP 测试阶段：照片存 BLOB，管理端只从 DB 读（ticket_item_id = receipt_lines.id）
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS ticket_item_photos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticket_item_id INTEGER NOT NULL,
+            cam_index INTEGER NOT NULL,
+            image_bytes BLOB NOT NULL,
+            mime TEXT DEFAULT 'image/jpeg',
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            FOREIGN KEY (ticket_item_id) REFERENCES receipt_lines(id)
+        )
+        """)
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS material_tier_prices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            material_id INTEGER NOT NULL,
+            tier_level INTEGER NOT NULL CHECK(tier_level BETWEEN 1 AND 5),
+            pct_adjustment REAL DEFAULT 0,
+            UNIQUE(material_id, tier_level),
+            FOREIGN KEY(material_id) REFERENCES materials(id)
+        )
+        """)
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS client_material_prices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_id INTEGER NOT NULL,
+            material_id INTEGER NOT NULL,
+            adjust_type TEXT NOT NULL DEFAULT 'pct',
+            adjust_value REAL NOT NULL DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            UNIQUE(client_id, material_id),
+            FOREIGN KEY(client_id) REFERENCES clients(id),
+            FOREIGN KEY(material_id) REFERENCES materials(id)
+        )
+        """)
+
+        # Migrate: add tier_level to clients if missing
+        cur.execute("PRAGMA table_info(clients)")
+        col_names = [r[1] for r in cur.fetchall()]
+        if "tier_level" not in col_names:
+            cur.execute("ALTER TABLE clients ADD COLUMN tier_level INTEGER DEFAULT 0")
 
         # ------------------------------------------------------------------
         # Seed defaults (idempotent)

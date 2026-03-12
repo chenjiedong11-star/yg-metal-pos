@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { margin: 0; padding: 0; background: transparent; font-family: sans-serif; }
+  .cam-row { display: flex; gap: 6px; width: 100%; }
+  .cam-box {
+    flex: 1; position: relative;
+    border: 1px solid #d1d5db; border-radius: 4px;
+    overflow: hidden; background: #111;
+    aspect-ratio: 16/9;
+  }
+  .cam-box video {
+    width: 100%; height: 100%;
+    object-fit: cover; display: block;
+  }
+  .cam-label {
+    position: absolute; top: 4px; left: 6px;
+    background: rgba(0,0,0,0.55); color: #fff;
+    font-size: 11px; padding: 1px 6px; border-radius: 3px; pointer-events: none; z-index: 2;
+  }
+  .cam-placeholder {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    color: #9ca3af; font-size: 13px; background: #111;
+  }
+</style>
+</head>
+<body>
+<div class="cam-row">
+  <div class="cam-box">
+    <video id="v1" autoplay playsinline muted></video>
+    <div id="p1" class="cam-placeholder" style="display:none;"></div>
+    <div class="cam-label">CAM 1</div>
+  </div>
+  <div class="cam-box">
+    <video id="v2" autoplay playsinline muted></video>
+    <div id="p2" class="cam-placeholder" style="display:none;"></div>
+    <div class="cam-label">CAM 2</div>
+  </div>
+</div>
+<script>
+(function() {
+  var parent = window.parent;
+  function send(type, payload) {
+    parent.postMessage(
+      Object.assign({ isStreamlitMessage: true, type: "streamlit:" + type }, payload || {}),
+      "*"
+    );
+  }
+  send("componentReady", { apiVersion: 1 });
+  send("setFrameHeight", { height: 280 });
+
+  var v1 = document.getElementById("v1");
+  var v2 = document.getElementById("v2");
+  var p1 = document.getElementById("p1");
+  var p2 = document.getElementById("p2");
+
+  var stream1 = null;
+  var stream2 = null;
+  var lastCaptureToken = -1;
+  var initDone = false;
+
+  function showPlaceholder(el, placeholder, msg) {
+    el.style.display = "none";
+    placeholder.style.display = "flex";
+    placeholder.textContent = msg;
+  }
+  function showVideo(el, placeholder) {
+    placeholder.style.display = "none";
+    el.style.display = "block";
+  }
+
+  function estimateBrightnessFromCanvas(ctx, w, h) {
+    var sampleSize = Math.min(20, w, h);
+    if (sampleSize < 2) return 0;
+    var imgData = ctx.getImageData(0, 0, sampleSize, sampleSize).data;
+    var total = 0, count = 0;
+    for (var i = 0; i < imgData.length; i += 4) {
+      var r = imgData[i], g = imgData[i + 1], b = imgData[i + 2];
+      total += (0.299 * r + 0.587 * g + 0.114 * b);
+      count += 1;
+    }
+    return count ? total / count : 0;
+  }
+
+  function captureOneFrame(videoEl) {
+    var w = videoEl.videoWidth || 640;
+    var h = videoEl.videoHeight || 480;
+    var canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    var ctx = canvas.getContext("2d");
+    ctx.drawImage(videoEl, 0, 0, w, h);
+    return { canvas: canvas, ctx: ctx, w: w, h: h };
+  }
+
+  function canvasToJpegB64(canvas, quality) {
+    return new Promise(function(resolve) {
+      canvas.toBlob(function(blob) {
+        if (!blob) { resolve({ b64: "", brightness: 0 }); return; }
+        var reader = new FileReader();
+        reader.onloadend = function() {
+          var dataUrl = reader.result;
+          var b64 = dataUrl.indexOf(",") >= 0 ? dataUrl.split(",")[1] : dataUrl;
+          resolve({ b64: b64, blob: blob });
+        };
+        reader.readAsDataURL(blob);
+      }, "image/jpeg", quality || 0.85);
+    });
+  }
+
+  function warmUp(videoEl) {
+    return new Promise(function(resolve) {
+      var readyElapsed = 0;
+      var maxMs = 500;
+      function checkReady() {
+        if (videoEl.readyState >= 2 && videoEl.videoWidth > 0 && videoEl.videoHeight > 0) {
+          requestAnimationFrame(function() {
+            requestAnimationFrame(resolve);
+          });
+          return;
+        }
+        if (readyElapsed >= maxMs) {
+          resolve();
+          return;
+        }
+        readyElapsed += 50;
+        setTimeout(checkReady, 50);
+      }
+      checkReady();
+    });
+  }
+
+  function captureCamera(videoEl, retriesLeft, brightnessThreshold) {
+    brightnessThreshold = brightnessThreshold !== undefined ? brightnessThreshold : 25;
+    retriesLeft = retriesLeft !== undefined ? retriesLeft : 2;
+    return warmUp(videoEl).then(function() {
+      var frame = captureOneFrame(videoEl);
+      var brightness = estimateBrightnessFromCanvas(frame.ctx, frame.w, frame.h);
+      return canvasToJpegB64(frame.canvas).then(function(o) {
+        if (brightness >= brightnessThreshold || retriesLeft <= 0) {
+          return { b64: o.b64, w: frame.w, h: frame.h, brightness: Math.round(brightness), ts: Date.now() };
+        }
+        return new Promise(function(resolve) {
+          setTimeout(function() {
+            captureCamera(videoEl, retriesLeft - 1, brightnessThreshold).then(resolve);
+          }, 50);
+        });
+      });
+    });
+  }
+
+  function doCapture() {
+    var result = { ok: false, cam1: null, cam2: null };
+    var prom1 = Promise.resolve(null);
+    if (v1.srcObject && v1.readyState >= 1) {
+      prom1 = captureCamera(v1).then(function(cam) {
+        if (cam && cam.b64 && cam.b64.length > 500) {
+          result.cam1 = {
+            data: "data:image/jpeg;base64," + cam.b64,
+            brightness: cam.brightness,
+            w: cam.w,
+            h: cam.h,
+            ts: cam.ts
+          };
+          return result.cam1;
+        }
+        return null;
+      }).catch(function() { return null; });
+    }
+    var prom2 = Promise.resolve(null);
+    if (v2.srcObject && v2.readyState >= 1) {
+      prom2 = captureCamera(v2).then(function(cam) {
+        if (cam && cam.b64 && cam.b64.length > 500) {
+          result.cam2 = {
+            data: "data:image/jpeg;base64," + cam.b64,
+            brightness: cam.brightness,
+            w: cam.w,
+            h: cam.h,
+            ts: cam.ts
+          };
+          return result.cam2;
+        }
+        return null;
+      }).catch(function() { return null; });
+    }
+    return Promise.all([prom1, prom2]).then(function() {
+      result.ok = !!(result.cam1 || result.cam2);
+      return result;
+    });
+  }
+
+  function initCameras() {
+    if (initDone) return Promise.resolve();
+    initDone = true;
+    return navigator.mediaDevices.enumerateDevices().then(function(devices) {
+      var cams = devices.filter(function(d) { return d.kind === "videoinput"; });
+      if (cams.length === 0) {
+        showPlaceholder(v1, p1, "No camera");
+        showPlaceholder(v2, p2, "No camera");
+        return;
+      }
+      var getStream = function(deviceId) {
+        return navigator.mediaDevices.getUserMedia({ video: { deviceId: deviceId ? { exact: deviceId } : true } });
+      };
+      getStream(cams[0].deviceId).then(function(s) {
+        stream1 = s;
+        v1.srcObject = s;
+        showVideo(v1, p1);
+      }).catch(function() {
+        getStream().then(function(s) {
+          stream1 = s;
+          v1.srcObject = s;
+          showVideo(v1, p1);
+        }).catch(function() {
+          showPlaceholder(v1, p1, "CAM 1 unavailable");
+        });
+      });
+      if (cams.length >= 2) {
+        getStream(cams[1].deviceId).then(function(s) {
+          stream2 = s;
+          v2.srcObject = s;
+          showVideo(v2, p2);
+        }).catch(function() {
+          showPlaceholder(v2, p2, "Only 1 camera");
+        });
+      } else {
+        showPlaceholder(v2, p2, "Only 1 camera");
+      }
+    }).catch(function() {
+      showPlaceholder(v1, p1, "Permission denied");
+      showPlaceholder(v2, p2, "Permission denied");
+    });
+  }
+
+  window.addEventListener("message", function(e) {
+    if (!e.data || e.data.type !== "streamlit:render") return;
+    var args = e.data.args || {};
+    var token = args.capture_token !== undefined ? args.capture_token : (args.captureToken !== undefined ? args.captureToken : null);
+    if (token === null || token === undefined) return;
+    var numToken = Number(token);
+    if (numToken !== numToken) return;
+    if (numToken <= lastCaptureToken) return;
+    lastCaptureToken = numToken;
+
+    initCameras().then(function() {
+      if (numToken === 0) return null;
+      return doCapture();
+    }).then(function(result) {
+      if (result == null) return;
+      send("setComponentValue", { value: JSON.stringify(result) });
+    }).catch(function(err) {
+      send("setComponentValue", { value: JSON.stringify({ ok: false, error: String(err && err.message) }) });
+    });
+  });
+})();
+</script>
+</body>
+</html>

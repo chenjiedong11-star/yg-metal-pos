@@ -21,6 +21,7 @@ def get_connection():
       - automatic COMMIT on success, ROLLBACK on exception
       - connection is always closed
     """
+    print(f"[DB] get_connection DB_PATH={DB_PATH}")
     conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")

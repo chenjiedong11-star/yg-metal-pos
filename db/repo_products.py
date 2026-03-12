@@ -143,3 +143,93 @@ def save_setting(key: str, value: str):
 
 def gen_withdraw_code() -> str:
     return str(random.randint(100000, 999999))
+
+
+# ---------------------------------------------------------------------------
+# Tier pricing
+# ---------------------------------------------------------------------------
+
+def get_material_tiers(material_id: int) -> dict:
+    """Return {tier_level: pct_adjustment} for a material (levels 1-5)."""
+    rows = qdf(
+        "SELECT tier_level, pct_adjustment FROM material_tier_prices WHERE material_id=?",
+        (material_id,),
+    )
+    result = {i: 0.0 for i in range(1, 6)}
+    for _, r in rows.iterrows():
+        result[int(r["tier_level"])] = float(r["pct_adjustment"])
+    return result
+
+
+def save_material_tiers(material_id: int, tiers: dict):
+    """Save tier percentages for a material. tiers = {1: 10.0, 2: 15.0, ...}"""
+    with get_connection() as conn:
+        for level, pct in tiers.items():
+            conn.execute(
+                "INSERT INTO material_tier_prices(material_id, tier_level, pct_adjustment) "
+                "VALUES(?,?,?) ON CONFLICT(material_id, tier_level) DO UPDATE SET pct_adjustment=?",
+                (material_id, int(level), float(pct), float(pct)),
+            )
+
+
+def get_client_material_prices(client_id: int):
+    """Return all custom price adjustments for a client as a list of dicts."""
+    return qdf("""
+        SELECT cmp.id, cmp.material_id, m.name AS material_name,
+               c.name AS category_name, cmp.adjust_type, cmp.adjust_value
+        FROM client_material_prices cmp
+        JOIN materials m ON m.id = cmp.material_id
+        JOIN material_categories c ON c.id = m.category_id
+        WHERE cmp.client_id = ?
+        ORDER BY c.sort_order, m.item_code
+    """, (client_id,))
+
+
+def save_client_material_price(client_id: int, material_id: int,
+                               adjust_type: str, adjust_value: float):
+    """Save or update a client-specific material price adjustment."""
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO client_material_prices(client_id, material_id, adjust_type, adjust_value) "
+            "VALUES(?,?,?,?) ON CONFLICT(client_id, material_id) DO UPDATE "
+            "SET adjust_type=?, adjust_value=?",
+            (client_id, material_id, adjust_type, float(adjust_value),
+             adjust_type, float(adjust_value)),
+        )
+
+
+def delete_client_material_price(record_id: int):
+    exec_sql("DELETE FROM client_material_prices WHERE id=?", (record_id,))
+
+
+def get_client_adjusted_price(client_id: int, material_id: int, base_price: float):
+    """Return the client-specific adjusted price, or None if no custom price set."""
+    row = qone(
+        "SELECT adjust_type, adjust_value FROM client_material_prices "
+        "WHERE client_id=? AND material_id=?",
+        (client_id, material_id),
+    )
+    if not row:
+        return None
+    if row["adjust_type"] == "pct":
+        return round(base_price * (1 + float(row["adjust_value"]) / 100.0), 3)
+    else:
+        return round(base_price + float(row["adjust_value"]), 3)
+
+
+def get_tier_adjusted_price(material_id: int, tier_level: int):
+    """Return the tier-adjusted unit price, or None if no tier / tier=0."""
+    if not tier_level or tier_level < 1 or tier_level > 5:
+        return None
+    row = qone(
+        "SELECT m.unit_price, COALESCE(t.pct_adjustment, 0) AS pct "
+        "FROM materials m LEFT JOIN material_tier_prices t "
+        "ON t.material_id=m.id AND t.tier_level=? "
+        "WHERE m.id=?",
+        (tier_level, material_id),
+    )
+    if not row:
+        return None
+    base = float(row["unit_price"] or 0)
+    pct = float(row["pct"] or 0)
+    return round(base * (1 + pct / 100.0), 3)

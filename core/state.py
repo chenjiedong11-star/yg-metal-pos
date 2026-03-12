@@ -57,6 +57,27 @@ def ss_init(default_operator_email: str = "admin@youli-trade.com"):
         "tare_value": "",
         # Phase 5: stable navigation
         "current_page": "ticketing",
+        # 拍照：Gross Enter 触发 capture（通过 capture_token 递增，组件内截帧不中断直播）
+        "capture_token": 0,
+        # 当前这一行是否已经 Confirm 过，防止重复确认生成多条明细
+        "_line_confirmed_once": False,
+        # 当前这一行是否已经因 Gross Enter 触发过一次拍照（避免 Confirm 再重复触发）
+        "_capture_pending": False,
+        # 若用户未按 Enter 触发拍照，则 Confirm 时先触发一次拍照，拍到后自动继续 Confirm
+        "confirm_after_capture": False,
+        "_cam_data_saved": False,
+        "_current_line_photos": None,
+        "_receipt_line_photos": [],
+        "pending_item_photos": None,
+        # 拍照按 token 绑定：每个 line 一个 token，避免被 rerun 覆盖
+        "pending_photos_by_token": {},
+        "pending_photo_ts_by_token": {},
+        "current_line_token": None,
+        "_saved_gross_before_tare": "",
+        "_draft_receipt_id": None,
+        "_receipt_line_ids": [],
+        # 当从 Gross Enter 跳到 Tare 时，请求在聚焦时选中 Tare 全部内容
+        "_select_tare_on_focus": False,
     }
     for k, v in defaults.items():
         if k not in st.session_state:

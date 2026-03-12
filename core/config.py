@@ -3,7 +3,10 @@ Global configuration constants.
 No imports from other project modules — this is the leaf of the dependency tree.
 """
 
-DB_PATH = "scrap_pos.db"
+import os
+
+# 使用绝对路径，优先环境变量 SCRAP_DB_PATH，避免“写 A 读 B”问题
+DB_PATH = os.path.abspath(os.getenv("SCRAP_DB_PATH", "scrap_pos.db"))
 
 RECEIPT_HEADER_LINES = ["YG METAL", "RC 4449276", "test@ygmetal.com"]
 RECEIPT_WIDTH = 48
